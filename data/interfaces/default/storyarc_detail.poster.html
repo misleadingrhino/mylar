@@ -34,10 +34,8 @@
                  <tr/><tr>
                  <td id="mainimg">
                    <fieldset>
-                       <div id="artistImg">
+                      <div id="aristImg">
                           <img src="${storyarcbanner}" onload="resizeimage('${bannerwidth}')" height="400" width="${bannerwidth}" id="banner" style="text-decoration: none;position: relative;top:0px;right:0px;left:0px;"/>
-                       </div>
-                   </fieldset>
                                  <%
                                          if arcdetail['percent'] == 101:
                                                  css = '<div class=\"progress-container warning\">'
@@ -48,9 +46,11 @@
 
                                   %>
                    <div style="display:table;margin:auto;position:relative;top:0px;"><span title="${arcdetail['percent']}"></span>${css}<div style="width:${arcdetail['percent']}%"><span class="progressbar-front-text">${arcdetail['Have']}/${arcdetail['Total']}</span></div></div></div>
+                   </div>
+                   </fieldset>
                  </td>
                  <td width="100%" padding="5px" style="vertical-align:bottom;">
-                     <div style="display:inline;position:relative;text-color:black;top:-200px;margin:0 auto;">
+                     <div style="display:inline;position:relative;text-color:black;top:-150px;margin:0 auto;">
                          <center><h1>${storyarcname}</h1>(${spanyears})</center>
                      </div>
 
@@ -62,7 +62,7 @@
                          %endif
                      </div>
                      <div class="row checkbox left clearfix">
-                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="read2filename" id="read2filename" value="1" ${checked(mylar.CONFIG.READ2FILENAME)} /><label>Prepend Reading# to filename</label>
+                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="read2filename" id="read2filename" value="1" ${checked(mylar.CONFIG.READ2FILENAME)} disabled /><label>Prepend Reading# to filename</label>
                          <%
                                if mylar.CONFIG.STORYARCDIR:
                                    carcdir = 'StoryArc'
@@ -71,17 +71,20 @@
                          %>
                      </div>
                      <div class="row checkbox left clearfix">
-                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="copy2arcdir" id="copy2arcdir" value="1" ${checked(mylar.CONFIG.COPY2ARCDIR)} /><label>Copy watchlisted issues to ${carcdir} Directory</label>
+                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="copy2arcdir" id="copy2arcdir" value="1" ${checked(mylar.CONFIG.COPY2ARCDIR)} disabled/><label>Copy watchlisted issues to ${carcdir} Directory</label>
                      </div>
                        <input type="hidden" name="StoryArcID" value="${storyarcid}">
                        <input type="hidden" name="StoryArcName" value="${storyarcname}">
                      <div style="display:inline;position:relative;top:0px;">
+                       &nbsp;
+<!--
                         <input type="submit" value="Update"/>
+-->
                      </div>
                     </form>
                    </div>
                         <%
-                             optpos = '<div style=\"display:block;float:right;position:relative;right:20px;top:50px;\">'
+                             optpos = '<div style=\"display:block;float:right;position:relative;right:20px;top:-10px;\">'
                          %>
                      ${optpos}
                          <form action="downloadBanner" method="GET">
@@ -199,6 +202,7 @@
                      <a href="#" onclick="doAjaxCall('queueit?ComicName=${item['ComicName'] | u}&ComicIssue=${item['IssueNumber']}&ComicYear=${issuedate}&mode=readlist&SARC=${item['StoryArc']}&IssueArcID=${item['IssueArcID']}&SeriesYear=${item['SeriesYear']}',$(this),'table')" data-success="Now searching for ${item['ComicName']} #${item['IssueNumber']}"><span class="ui-icon ui-icon-plus"></span>Grab</a>
                  %elif item['Status'] == 'Snatched':
                      <a href="#" onclick="doAjaxCall('queueit?ComicName=${item['ComicName'] | u}&ComicIssue=${item['IssueNumber']}&ComicYear=${issuedate}&mode=readlist&SARC=${item['StoryArc']}&IssueArcID=${item['IssueArcID']}&SeriesYear=${item['SeriesYear']}',$(this),'table')" data-success="Trying to search again for issue"><span class="ui-icon ui-icon-plus"></span>Retry</a>
+                     <a href="#" onclick="doAjaxCall('clear_arcstatus?issuearcid=${item['IssueArcID']}',$(this),'table')"><data success="Clearing status of ${item['Status']} for ${item['ComicName']} #${item['IssueNumber']}"><span class="ui-icon ui-icon-plus"></span>Clear Status</a>
                  %elif item['Status'] == 'Downloaded' and item['Location'] is not None:
                      <a href="downloadthis?pathfile=${item['Location'] |u}"><span class="ui-icon ui-icon-plus"></span>Download</a>
                  %endif

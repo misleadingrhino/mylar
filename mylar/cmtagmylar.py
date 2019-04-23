@@ -58,8 +58,8 @@ def run(dirName, nzbName=None, issueid=None, comversion=None, manual=None, filen
         else:
             shutil.copy(filepath, new_filepath)
         filepath = new_filepath  
-    except:
-        logger.warn(module + ' Unexpected Error: %s' % sys.exc_info()[0])
+    except Exception as e:
+        logger.warn('%s Unexpected Error: %s [%s]' % (module, sys.exc_info()[0], e))
         logger.warn(module + ' Unable to create temporary directory to perform meta-tagging. Processing without metatagging.')
         tidyup(og_filepath, new_filepath, new_folder, manualmeta)
         return "fail"
@@ -216,6 +216,15 @@ def run(dirName, nzbName=None, issueid=None, comversion=None, manual=None, filen
                     tmpfilename = re.sub('\(Original deleted\)', '', tmpfilename).strip()
                 tmpf = tmpfilename.decode('utf-8')
                 filepath = os.path.join(comicpath, tmpf)
+                if filename.lower() != tmpf.lower() and tmpf.endswith('(1).cbz'):
+                    logger.fdebug('New filename [%s] is named incorrectly due to duplication during metatagging - Making sure it\'s named correctly [%s].' % (tmpf, filename))
+                    tmpfilename = filename
+                    filepath_new = os.path.join(comicpath, tmpfilename)
+                    try:
+                        os.rename(filepath, filepath_new)
+                        filepath = filepath_new
+                    except:
+                        logger.warn('%s unable to rename file to accomodate metatagging cbz to the same filename' % module)
                 if not os.path.isfile(filepath):
                     logger.fdebug(module + 'Trying utf-8 conversion.')
                     tmpf = tmpfilename.encode('utf-8')

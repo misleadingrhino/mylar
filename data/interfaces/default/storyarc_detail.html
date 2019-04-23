@@ -14,7 +14,7 @@
 			<a id="menu_link_delete" href="#">Remove Read</a>
 			<a id="menu_link_delete" href="#">Clear File Cache</a>
                         <a id="menu_link_refresh" onclick="doAjaxCall('SearchArcIssues?StoryArcID=${storyarcid}',$(this),'table')" data-success="Now searching for Missing StoryArc Issues">Search for Missing</a>
-                        <a id="menu_link_refresh" onclick="doAjaxCall('ArcWatchlist?StoryArcID=${storyarcid}',$(this),'table')" data-success="Now searching for matches on Watchlist">Search for Watchlist matches</a>
+                        <a id="menu_link_refresh" onclick="doAjaxCall('ArcWatchlist?StoryArcID=${storyarcid}',$(this),'table')" data-success="Now searching for matches on Watchlist & Rechecking files">Search for Watchlist matches/Recheck Files</a>
                         %if cvarcid:
                             <a id="menu_link_refresh" onclick="doAjaxCall('addStoryArc_thread?arcid=${storyarcid}&cvarcid=${cvarcid}&storyarcname=${storyarcname}&arcrefresh=True',$(this),'table')" data-success="Refreshed Story Arc">Refresh Story Arc</a>
                         %endif
@@ -60,14 +60,14 @@
                          <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" /><label>Show Downloaded Story Arc Issues on ReadingList tab</label><br/>
                          <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" /><label>Enforce Renaming/MetaTagging options (if enabled)</label><br/>
 -->
-                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="read2filename" id="read2filename" value="1" ${checked(mylar.CONFIG.READ2FILENAME)} /><label>Prepend Reading# to filename</label><br/>
+                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="read2filename" id="read2filename" value="1" ${checked(mylar.CONFIG.READ2FILENAME)} disabled/><label>Prepend Reading# to filename</label><br/>
                          <%
                                if mylar.CONFIG.STORYARCDIR:
                                    carcdir = 'StoryArc'
                                else:
                                    carcdir = 'GrabBag'
                          %>
-                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="copy2arcdir" id="copy2arcdir" value="1" ${checked(mylar.CONFIG.COPY2ARCDIR)} /><label>Copy watchlisted issues to ${carcdir} Directory</label>
+                         <input type="checkbox" style="vertical-align: middle; margin: 3px; margin-top: -1px;" name="copy2arcdir" id="copy2arcdir" value="1" ${checked(mylar.CONFIG.COPY2ARCDIR)} disabled /><label>Copy watchlisted issues to ${carcdir} Directory</label>
 
                        <input type="hidden" name="StoryArcID" value="${storyarcid}">
                        <input type="hidden" name="StoryArcName" value="${storyarcname}">
@@ -75,7 +75,10 @@
                     </fieldset>
                     </form>
                      <div style="display:block;position:relative;top:10px;">
+                        &nbsp;
+<!--
                         <input type="submit" value="Update"/>
+-->
                      </div>
                      <div style="display:block;float:right;position:relative;text-color:black;top:-130px;">
                          <h1><p style="display:inline;float:right;">${storyarcname}</h1>
@@ -110,6 +113,10 @@
            </table>
           </div>
          </div>
+
+<!--
+        <button type="button" onclick="">Finalize & Rename</button>
+-->
 	<table class="display" id="arc_detail">
 		<thead>
 			<tr>
@@ -201,6 +208,7 @@
                      <a href="#" onclick="doAjaxCall('queueit?ComicName=${item['ComicName'] | u}&ComicIssue=${item['IssueNumber']}&ComicYear=${issuedate}&mode=readlist&SARC=${item['StoryArc']}&IssueArcID=${item['IssueArcID']}&SeriesYear=${item['SeriesYear']}',$(this),'table')" data-success="Now searching for ${item['ComicName']} #${item['IssueNumber']}"><span class="ui-icon ui-icon-plus"></span>Grab</a>
                  %elif item['Status'] == 'Snatched':
                      <a href="#" onclick="doAjaxCall('queueit?ComicName=${item['ComicName'] | u}&ComicIssue=${item['IssueNumber']}&ComicYear=${issuedate}&mode=readlist&SARC=${item['StoryArc']}&IssueArcID=${item['IssueArcID']}&SeriesYear=${item['SeriesYear']}',$(this),'table')" data-success="Trying to search again for issue"><span class="ui-icon ui-icon-plus"></span>Retry</a>
+                     <a href="#" onclick="doAjaxCall('clear_arcstatus?issuearcid=${item['IssueArcID']}',$(this),'table')"><data success="Clearing status of ${item['Status']} for ${item['ComicName']} #${item['IssueNumber']}"><span class="ui-icon ui-icon-plus"></span>Clear Status</a>
                  %elif item['Status'] == 'Downloaded' and item['Location'] is not None:
                      <a href="downloadthis?pathfile=${item['Location'] |u}"><span class="ui-icon ui-icon-plus"></span>Download</a>
                  %endif
@@ -312,6 +320,8 @@
 				       "sInfoFiltered":"(filtered from _MAX_ total items)"},
 			        "iDisplayLength": 25,
 			        "sPaginationType": "full_numbers",
+			        "stateDuration": 0,
+			        "stateSave": true,
 			        "aaSorting": []
                         })
 		        resetFilters("item");

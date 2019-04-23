@@ -54,11 +54,10 @@ class tehMain():
                 logger.info('[RSS-FEEDS] Initiating Torrent RSS Check.')
                 if mylar.CONFIG.ENABLE_PUBLIC:
                     logger.info('[RSS-FEEDS] Initiating Torrent RSS Feed Check on Demonoid / WorldWideTorrents.')
-                    #rsscheck.torrents(pickfeed='3')   #TP.SE RSS Check (has to be page-parsed)
                     rsscheck.torrents(pickfeed='Public')    #TPSE = DEM RSS Check + WWT RSS Check
-                if mylar.CONFIG.ENABLE_32P:
+                if mylar.CONFIG.ENABLE_32P is True:
                     logger.info('[RSS-FEEDS] Initiating Torrent RSS Feed Check on 32P.')
-                    if mylar.CONFIG.MODE_32P == 0:
+                    if mylar.CONFIG.MODE_32P is False:
                         logger.fdebug('[RSS-FEEDS] 32P mode set to Legacy mode. Monitoring New Releases feed only.')
                         if any([mylar.CONFIG.PASSKEY_32P is None, mylar.CONFIG.PASSKEY_32P == '', mylar.CONFIG.RSSFEED_32P is None, mylar.CONFIG.RSSFEED_32P == '']):
                             logger.error('[RSS-FEEDS] Unable to validate information from provided RSS Feed. Verify that the feed provided is a current one.')
@@ -75,8 +74,7 @@ class tehMain():
                                 if feedinfo != "disable":
                                     pass
                                 else:
-                                    mylar.CONFIG.ENABLE_32P = 0
-                                    #mylar.config_write()
+                                    helpers.disable_provider('32P')
                             else:
                                 feedinfo = mylar.FEEDINFO_32P
 
@@ -93,6 +91,9 @@ class tehMain():
 
             logger.info('[RSS-FEEDS] Initiating RSS Feed Check for NZB Providers.')
             rsscheck.nzbs(forcerss=forcerss)
+            if mylar.CONFIG.ENABLE_DDL is True:
+                logger.info('[RSS-FEEDS] Initiating RSS Feed Check for DDL Provider.')
+                rsscheck.ddl(forcerss=forcerss)
             logger.info('[RSS-FEEDS] RSS Feed Check/Update Complete')
             logger.info('[RSS-FEEDS] Watchlist Check for new Releases')
             mylar.search.searchforissue(rsscheck='yes')

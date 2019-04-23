@@ -27,6 +27,9 @@ import time
 import simplejson
 import json
 import requests
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # This was obviously all taken from headphones with great appreciation :)
 
@@ -80,127 +83,6 @@ class PROWL:
     def test_notify(self):
         self.notify('ZOMG Lazors Pewpewpew!', 'Test Message')
 
-class NMA:
-
-    def __init__(self, test_apikey=None):
-
-        self.NMA_URL = "https://www.notifymyandroid.com/publicapi/notify"
-        self.TEST_NMA_URL = "https://www.notifymyandroid.com/publicapi/verify"
-        if test_apikey is None:
-            self.apikey = mylar.CONFIG.NMA_APIKEY
-            self.test = False
-        else:
-            self.apikey = test_apikey
-            self.test = True
-        self.priority = mylar.CONFIG.NMA_PRIORITY
-
-        self._session = requests.Session()
-
-    def _send(self, data, module):
-        try:
-            r = self._session.post(self.NMA_URL, data=data, verify=True)
-        except requests.exceptions.RequestException as e:                
-            logger.error(module + '[' + str(e) + '] Unable to send via NMA. Aborting notification for this item.')
-            return {'status':  False,
-                    'message': str(e)}
-
-        logger.fdebug('[NMA] Status code returned: ' + str(r.status_code))
-        if r.status_code == 200:
-            from xml.dom.minidom import parseString
-            dom = parseString(r.content)
-            try:
-                success_info = dom.getElementsByTagName('success')
-                success_code = success_info[0].getAttribute('code')
-            except:
-                error_info = dom.getElementsByTagName('error')
-                error_code = error_info[0].getAttribute('code')
-                error_message = error_info[0].childNodes[0].nodeValue
-                logger.info(module + '[' + str(error_code) + '] ' + error_message)
-                return {'status':  False,
-                        'message': '[' + str(error_code) + '] ' + error_message}
-
-            else:
-                if self.test is True:
-                    logger.info(module + '[' + str(success_code) + '] NotifyMyAndroid apikey valid. Test notification sent successfully.')
-                else:
-                    logger.info(module + '[' + str(success_code) + '] NotifyMyAndroid notification sent successfully.')
-                return {'status':  True,
-                        'message': 'APIKEY verified OK / notification sent'}
-        elif r.status_code >= 400 and r.status_code < 500:
-            logger.error(module + ' NotifyMyAndroid request failed: %s' % r.content)
-            return {'status':  False,
-                    'message': 'APIKEY verified OK / failure to send notification'}
-        else:
-            logger.error(module + ' NotifyMyAndroid notification failed serverside.')
-            return {'status':  False,
-                    'message': 'APIKEY verified OK / failure to send notification'}
-
-    def notify(self, snline=None, prline=None, prline2=None, snatched_nzb=None, sent_to=None, prov=None, module=None):
-
-        if module is None:
-            module = ''
-        module += '[NOTIFIER]'
-
-        apikey = self.apikey
-        priority = self.priority
-
-        if snatched_nzb:
-            if snatched_nzb[-1] == '\.': snatched_nzb = snatched_nzb[:-1]
-            event = snline
-            description = "Mylar has snatched: " + snatched_nzb + " from " + prov + " and has sent it to " + sent_to
-        else:
-            event = prline
-            description = prline2
-
-        data = {'apikey': apikey, 'application': 'Mylar', 'event': event.encode('utf-8'), 'description': description.encode('utf-8'), 'priority': priority}
-
-        logger.info(module + ' Sending notification request to NotifyMyAndroid')
-        request = self._send(data, module)
-
-        if not request:
-            logger.warn(module + ' Error sending notification request to NotifyMyAndroid')
-
-    def test_notify(self):
-        module = '[TEST-NOTIFIER]'
-        try:
-            r = self._session.get(self.TEST_NMA_URL, params={'apikey': self.apikey}, verify=True)
-        except requests.exceptions.RequestException as e:
-            logger.error(module + '[' + str(e) + '] Unable to send via NMA. Aborting test notification - something is probably wrong...')
-            return {'status':  False,
-                    'message': str(e)}
-
-        logger.fdebug('[NMA] Status code returned: ' + str(r.status_code))
-        if r.status_code == 200:
-            from xml.dom.minidom import parseString
-            dom = parseString(r.content)
-            try:
-                success_info = dom.getElementsByTagName('success')
-                success_code = success_info[0].getAttribute('code')
-            except:
-                error_info = dom.getElementsByTagName('error')
-                error_code = error_info[0].getAttribute('code')
-                error_message = error_info[0].childNodes[0].nodeValue
-                logger.info(module + '[' + str(error_code) + '] ' + error_message)
-                return {'status':  False,
-                        'message': '[' + str(error_code) + '] ' + error_message}
-
-            else:
-                logger.info(module + '[' + str(success_code) + '] NotifyMyAndroid apikey valid. Testing notification service with it.')
-        elif r.status_code >= 400 and r.status_code < 500:
-            logger.error(module + ' NotifyMyAndroid request failed: %s' % r.content)
-            return {'status':  False,
-                    'message': 'Unable to send request to NMA - check your connection.'}
-        else:
-            logger.error(module + ' NotifyMyAndroid notification failed serverside.')
-            return {'status':  False,
-                    'message': 'Internal Server Error. Try again later.'}
-
-        event = 'Test Message'
-        description = 'ZOMG Lazors PewPewPew!'
-        data = {'apikey': self.apikey, 'application': 'Mylar', 'event': event.encode('utf-8'), 'description': description.encode('utf-8'), 'priority': 2}
-
-        return self._send(data,'[NOTIFIER]')
-
 # 2013-04-01 Added Pushover.net notifications, based on copy of Prowl class above.
 # No extra care has been put into API friendliness at the moment (read: https://pushover.net/api#friendly)
 class PUSHOVER:
@@ -208,8 +90,10 @@ class PUSHOVER:
     def __init__(self, test_apikey=None, test_userkey=None, test_device=None):
         if all([test_apikey is None, test_userkey is None, test_device is None]):
             self.PUSHOVER_URL = 'https://api.pushover.net/1/messages.json'
+            self.test = False
         else:
             self.PUSHOVER_URL = 'https://api.pushover.net/1/users/validate.json'
+            self.test = True
         self.enabled = mylar.CONFIG.PUSHOVER_ENABLED
         if test_apikey is None:
             if mylar.CONFIG.PUSHOVER_APIKEY is None or mylar.CONFIG.PUSHOVER_APIKEY == 'None':
@@ -236,8 +120,7 @@ class PUSHOVER:
         self._session.headers = {'Content-type': "application/x-www-form-urlencoded"}
 
     def notify(self, event, message=None, snatched_nzb=None, prov=None, sent_to=None, module=None):
-        if not mylar.CONFIG.PUSHOVER_ENABLED:
-            return
+
         if module is None:
             module = ''
         module += '[NOTIFIER]'
@@ -245,7 +128,7 @@ class PUSHOVER:
         if snatched_nzb:
             if snatched_nzb[-1] == '\.': 
                 snatched_nzb = snatched_nzb[:-1]
-            message = "Mylar has snatched: " + snatched_nzb + " from " + prov + " and has sent it to " + sent_to
+            message = "Mylar has snatched: " + snatched_nzb + " from " + prov + " and " + sent_to
 
         data = {'token': mylar.CONFIG.PUSHOVER_APIKEY,
                 'user': mylar.CONFIG.PUSHOVER_USERKEY,
@@ -261,23 +144,36 @@ class PUSHOVER:
         if r.status_code == 200:
             try:
                 response = r.json()
-                if 'devices' in response:
-                    logger.info('%s PushOver notifications sent. Available devices: %s' % (module, response))
+                if 'devices' in response and self.test is True:
+                    logger.fdebug('%s Available devices: %s' % (module, response))
+                    if any([self.device is None, self.device == 'None']):
+                        self.device = 'all available devices'
+
+                    r = self._session.post('https://api.pushover.net/1/messages.json', data=data, verify=True)
+                    if r.status_code == 200:
+                        logger.info('%s PushOver notifications sent to %s.' % (module, self.device))
+                    elif r.status_code >=400 and r.status_code < 500:
+                        logger.error('%s PushOver request failed to %s: %s' % (module, self.device, r.content))
+                        return False
+                    else:
+                        logger.error('%s PushOver notification failed serverside.' % module)
+                        return False
                 else:
                     logger.info('%s PushOver notifications sent.' % module)
             except Exception as e:
                 logger.warn('%s[ERROR] - %s' % (module, e))
-
-            return True
+                return False
+            else:
+                return True
         elif r.status_code >= 400 and r.status_code < 500:
-            logger.error(module + ' PushOver request failed: %s' % r.content)
+            logger.error('%s PushOver request failed: %s' % (module, r.content))
             return False
         else:
-            logger.error(module + ' PushOver notification failed serverside.')
+            logger.error('%s PushOver notification failed serverside.' % module)
             return False
 
     def test_notify(self):
-        return self.notify(message='Release the Ninjas!',event='Test Message')
+        return self.notify(event='Test Message', message='Release the Ninjas!')
 
 class BOXCAR:
 
@@ -345,7 +241,7 @@ class BOXCAR:
         # if no username was given then use the one from the config
         if snatched_nzb:
             title = snline
-            message = "Mylar has snatched: " + snatched_nzb + " and has sent it to " + sent_to
+            message = "Mylar has snatched: " + snatched_nzb + " and " + sent_to
         else:
             title = prline
             message = prline2
@@ -398,7 +294,7 @@ class PUSHBULLET:
             if snatched:
                 if snatched[-1] == '.': snatched = snatched[:-1]
                 event = snline
-                message = "Mylar has snatched: " + snatched + " from " + prov + " and has sent it to " + sent_to
+                message = "Mylar has snatched: " + snatched + " from " + prov + " and " + sent_to
             else:
                 event = prline + ' complete!'
                 message = prline2
@@ -465,15 +361,72 @@ class TELEGRAM:
     def test_notify(self):
         return self.notify('Test Message: Release the Ninjas!')
 
-class SLACK:
-    def __init__(self, test_webhook_url=None):
-        self.webhook_url = mylar.CONFIG.SLACK_WEBHOOK_URL if test_webhook_url is None else test_webhook_url
-        
-    def notify(self, text, attachment_text, module=None):
+class EMAIL:
+    def __init__(self, test_emailfrom=None, test_emailto=None, test_emailsvr=None, test_emailport=None, test_emailuser=None, test_emailpass=None, test_emailenc=None):
+        self.emailfrom = mylar.CONFIG.EMAIL_FROM if test_emailfrom is None else test_emailfrom
+        self.emailto = mylar.CONFIG.EMAIL_TO if test_emailto is None else test_emailto
+        self.emailsvr = mylar.CONFIG.EMAIL_SERVER if test_emailsvr is None else test_emailsvr
+        self.emailport = mylar.CONFIG.EMAIL_PORT if test_emailport is None else test_emailport
+        self.emailuser = mylar.CONFIG.EMAIL_USER if test_emailuser is None else test_emailuser
+        self.emailpass = mylar.CONFIG.EMAIL_PASSWORD if test_emailpass is None else test_emailpass
+        self.emailenc = mylar.CONFIG.EMAIL_ENC if test_emailenc is None else int(test_emailenc)
+
+    def notify(self, message, subject, module=None):
         if module is None:
             module = ''
         module += '[NOTIFIER]'
-        
+        sent_successfully = False
+
+        try:
+            logger.debug(module + u' Sending email notification. From: [%s] - To: [%s] - Server: [%s] - Port: [%s] - Username: [%s] - Password: [********] - Encryption: [%s] - Message: [%s]' % (self.emailfrom, self.emailto, self.emailsvr, self.emailport, self.emailuser, self.emailenc, message))
+            msg = MIMEMultipart()
+            msg['From'] = str(self.emailfrom)
+            msg['To'] = str(self.emailto)
+            msg['Subject'] = subject
+            msg.attach(MIMEText(message, 'plain'))
+
+            if self.emailenc is 1:
+                sock = smtplib.SMTP_SSL(self.emailsvr, str(self.emailport))
+            else:
+                sock = smtplib.SMTP(self.emailsvr, str(self.emailport))
+
+            if self.emailenc is 2:
+                sock.starttls()
+
+            if self.emailuser or self.emailpass:
+                sock.login(str(self.emailuser), str(self.emailpass))
+
+            sock.sendmail(str(self.emailfrom), str(self.emailto), msg.as_string())
+            sock.quit()
+            sent_successfully = True
+
+        except Exception, e:
+            logger.warn(module + u' Oh no!! Email notification failed: ' + str(e))
+
+        return sent_successfully
+
+    def test_notify(self):
+        return self.notify('Test Message: With great power comes great responsibility.', 'Mylar notification - Test')
+
+class SLACK:
+    def __init__(self, test_webhook_url=None):
+        self.webhook_url = mylar.CONFIG.SLACK_WEBHOOK_URL if test_webhook_url is None else test_webhook_url
+
+    def notify(self, text, attachment_text, snatched_nzb=None, prov=None, sent_to=None, module=None):
+        if module is None:
+            module = ''
+        module += '[NOTIFIER]'
+
+        if 'snatched' in attachment_text.lower():
+            snatched_text = '%s: %s' % (attachment_text, snatched_nzb)
+            if all([sent_to is not None, prov is not None]):
+                snatched_text += ' from %s and %s' % (prov, sent_to)
+            elif sent_to is None:
+                snatched_text += ' from %s' % prov
+            attachment_text = snatched_text
+        else:
+            pass
+
         payload = {
 #            "text": text,
 #            "attachments": [
@@ -499,6 +452,6 @@ class SLACK:
 
         logger.info(module + u"Slack notifications sent.")
         return sent_successfuly
-        
+
     def test_notify(self):
         return self.notify('Test Message', 'Release the Ninjas!')

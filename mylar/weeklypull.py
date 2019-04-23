@@ -46,7 +46,7 @@ def pullit(forcecheck=None, weeknumber=None, year=None):
             except (sqlite3.OperationalError, TypeError), msg:
                 logger.info(u"Error Retrieving weekly pull list - attempting to adjust")
                 myDB.action("DROP TABLE weekly")
-                myDB.action("CREATE TABLE IF NOT EXISTS weekly (SHIPDATE TEXT, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, rowid INTEGER PRIMARY KEY)")
+                myDB.action("CREATE TABLE IF NOT EXISTS weekly (SHIPDATE TEXT, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, format TEXT, rowid INTEGER PRIMARY KEY)")
                 pulldate = '00000000'
                 logger.fdebug(u"Table re-created, trying to populate")
         else:
@@ -81,7 +81,9 @@ def pullit(forcecheck=None, weeknumber=None, year=None):
         elif chk_locg['status'] == 'success':
             logger.info('[PULL-LIST] Weekly Pull List successfully loaded with ' + str(chk_locg['count']) + ' issues.')
             return new_pullcheck(chk_locg['weeknumber'],chk_locg['year'])
-
+        elif chk_locg['status'] == 'update_required':
+            logger.warn('[PULL-LIST] Your version of Mylar is not up-to-date. You MUST update before this works')
+            return
         else:
             logger.info('[PULL-LIST] Unable to retrieve weekly pull-list. Dropping down to legacy method of PW-file')
             mylar.PULLBYFILE = pull_the_file(newrl)
@@ -440,7 +442,7 @@ def pullit(forcecheck=None, weeknumber=None, year=None):
         logger.info(u"Populating the NEW Weekly Pull list into Mylar for week " + str(weeknumber))
 
         myDB.action("drop table if exists weekly")
-        myDB.action("CREATE TABLE IF NOT EXISTS weekly (SHIPDATE, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, rowid INTEGER PRIMARY KEY)")
+        myDB.action("CREATE TABLE IF NOT EXISTS weekly (SHIPDATE, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, format TEXT, rowid INTEGER PRIMARY KEY)")
 
         csvfile = open(newfl, "rb")
         creader = csv.reader(csvfile, delimiter='\t')
@@ -962,10 +964,10 @@ def new_pullcheck(weeknumber, pullyear, comic1off_name=None, comic1off_id=None, 
                     annualidmatch = [x for x in weeklylist if week['annuallink'] is not None and (int(x['ComicID']) == int(week['annuallink']))]
             #The above will auto-match against ComicID if it's populated on the pullsite, otherwise do name-matching.
             namematch = [ab for ab in weeklylist if ab['DynamicName'] == week['dynamicname']]
-            logger.fdebug('rowid: ' + str(week['rowid']))
-            logger.fdebug('idmatch: ' + str(idmatch))
-            logger.fdebug('annualidmatch: ' + str(annualidmatch))
-            logger.fdebug('namematch: ' + str(namematch))
+            #logger.fdebug('rowid: ' + str(week['rowid']))
+            #logger.fdebug('idmatch: ' + str(idmatch))
+            #logger.fdebug('annualidmatch: ' + str(annualidmatch))
+            #logger.fdebug('namematch: ' + str(namematch))
             if any([idmatch,namematch,annualidmatch]):
                 if idmatch and not annualidmatch:
                     comicname = idmatch[0]['ComicName'].strip()

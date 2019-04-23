@@ -21,6 +21,7 @@ from datetime import timedelta, date
 import subprocess
 import requests
 import shlex
+import Queue
 import json
 import re
 import sys
@@ -37,7 +38,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import mylar
 import logger
-from mylar import sabnzbd, nzbget, process
+from mylar import db, sabnzbd, nzbget, process, getcomics
 
 def multikeysort(items, columns):
 
@@ -183,12 +184,15 @@ def human2bytes(s):
     num = re.sub(',', '', s[:-1])
     #assert num.isdigit() and letter in symbols
     #use below assert statement to handle sizes with decimal places
-    assert float(num) and letter in symbols
-    num = float(num)
-    prefix = {symbols[0]: 1}
-    for i, s in enumerate(symbols[1:]):
-        prefix[s] = 1 << (i +1) *10
-    return int(num * prefix[letter])
+    if num != '0':
+        assert float(num) and letter in symbols
+        num = float(num)
+        prefix = {symbols[0]: 1}
+        for i, s in enumerate(symbols[1:]):
+            prefix[s] = 1 << (i +1) *10
+        return int(num * prefix[letter])
+    else:
+        return 0
 
 def replace_all(text, dic):
     for i, j in dic.iteritems():
@@ -263,7 +267,7 @@ def decimal_issue(iss):
     return deciss, dec_except
 
 def rename_param(comicid, comicname, issue, ofilename, comicyear=None, issueid=None, annualize=None, arc=False):
-            import db
+            #import db
             myDB = db.DBConnection()
             comicid = str(comicid)   # it's coming in unicoded...
 
@@ -393,6 +397,7 @@ def rename_param(comicid, comicname, issue, ofilename, comicyear=None, issueid=N
                                 'NOW',
                                 'AI',
                                 'MU',
+                                'HU',
                                 'A',
                                 'B',
                                 'C',
@@ -715,7 +720,7 @@ def ComicSort(comicorder=None, sequence=None, imported=None):
     if sequence:
         # if it's on startup, load the sql into a tuple for use to avoid record-locking
         i = 0
-        import db
+        #import db
         myDB = db.DBConnection()
         comicsort = myDB.select("SELECT * FROM comics ORDER BY ComicSortName COLLATE NOCASE")
         comicorderlist = []
@@ -789,7 +794,7 @@ def fullmonth(monthno):
     monthconv = None
 
     for numbs in basmonths:
-        if numbs in str(int(monthno)):
+        if int(numbs) == int(monthno):
             monthconv = basmonths[numbs]
 
     return monthconv
@@ -800,7 +805,7 @@ def updateComicLocation():
     #                  - set NEWCOMDIR = new ComicLocation
     #after running, set ComicLocation to new location in Configuration GUI
 
-    import db
+    #import db
     myDB = db.DBConnection()
     if mylar.CONFIG.NEWCOM_DIR is not None:
         logger.info('Performing a one-time mass update to Comic Location')
@@ -821,6 +826,18 @@ def updateComicLocation():
 
                 publisher = re.sub('!', '', dl['ComicPublisher']) # thanks Boom!
                 year = dl['ComicYear']
+
+                if dl['Corrected_Type'] is not None:
+                    booktype = dl['Corrected_Type']
+                else:
+                    booktype = dl['Type']
+                if booktype == 'Print' or all([booktype != 'Print', mylar.CONFIG.FORMAT_BOOKTYPE is False]):
+                    chunk_fb = re.sub('\$Type', '', mylar.CONFIG.FOLDER_FORMAT)
+                    chunk_b = re.compile(r'\s+')
+                    chunk_folder_format = chunk_b.sub(' ', chunk_fb)
+                else:
+                    chunk_folder_format = mylar.CONFIG.FOLDER_FORMAT
+
                 comversion = dl['ComicVersion']
                 if comversion is None:
                     comversion = 'None'
@@ -841,7 +858,8 @@ def updateComicLocation():
                           '$publisher':     publisher.lower(),
                           '$VolumeY':       'V' + str(year),
                           '$VolumeN':       comversion,
-                          '$Annual':        'Annual'
+                          '$Annual':        'Annual',
+                          '$Type':          booktype
                           }
 
                 #set the paths here with the seperator removed allowing for cross-platform altering.
@@ -919,7 +937,7 @@ def cleanhtml(raw_html):
 
 
 def issuedigits(issnum):
-    import db
+    #import db
 
     int_issnum = None
 
@@ -973,6 +991,12 @@ def issuedigits(issnum):
                     int_issnum = (int(issnum[:-2]) * 1000) + ord('m') + ord('u')
                 else:
                     int_issnum = (int(issnum[:-3]) * 1000) + ord('m') + ord('u')
+            elif 'hu' in issnum.lower():
+                remdec = issnum.find('.')  #find the decimal position.
+                if remdec == -1:
+                    int_issnum = (int(issnum[:-2]) * 1000) + ord('h') + ord('u')
+                else:
+                    int_issnum = (int(issnum[:-3]) * 1000) + ord('h') + ord('u')
 
         except ValueError as e:
             logger.error('[' + issnum + '] Unable to properly determine the issue number. Error: %s', e)
@@ -1001,8 +1025,11 @@ def issuedigits(issnum):
         x = [vals[key] for key in vals if key in issnum]
 
         if x:
-            #logger.fdebug('Unicode Issue present - adjusting.')
-            int_issnum = x[0] * 1000
+            chk = re.sub('[^0-9]', '', issnum).strip()
+            if len(chk) == 0:
+                int_issnum = x[0] * 1000
+            else:
+                int_issnum = (int(re.sub('[^0-9]', '', issnum).strip()) + x[0]) * 1000
             #logger.fdebug('int_issnum: ' + str(int_issnum))
         else:
             if any(['.' in issnum, ',' in issnum]):
@@ -1079,8 +1106,16 @@ def issuedigits(issnum):
                                 a+=1
                             int_issnum = (int(issno) * 1000) + ordtot
                     elif invchk == "true":
-                        logger.fdebug('this does not have an issue # that I can parse properly.')
-                        return 999999999999999
+                        if any([issnum.lower() == 'fall', issnum.lower() == 'spring', issnum.lower() == 'summer', issnum.lower() == 'winter']):
+                            inu = 0
+                            ordtot = 0
+                            while (inu < len(issnum)):
+                                ordtot += ord(issnum[inu].lower())  #lower-case the letters for simplicty
+                                inu+=1
+                            int_issnum = ordtot
+                        else:
+                            logger.fdebug('this does not have an issue # that I can parse properly.')
+                            return 999999999999999
                     else:
                         if issnum == '9-5':
                             issnum = u'9\xbd'
@@ -1105,7 +1140,7 @@ def issuedigits(issnum):
 
 
 def checkthepub(ComicID):
-    import db
+    #import db
     myDB = db.DBConnection()
     publishers = ['marvel', 'dc', 'darkhorse']
     pubchk = myDB.selectone("SELECT * FROM comics WHERE ComicID=?", [ComicID]).fetchone()
@@ -1122,7 +1157,7 @@ def checkthepub(ComicID):
         return mylar.CONFIG.INDIE_PUB
 
 def annual_update():
-    import db
+    #import db
     myDB = db.DBConnection()
     annuallist = myDB.select('SELECT * FROM annuals')
     if annuallist is None:
@@ -1178,7 +1213,7 @@ def renamefile_readingorder(readorder):
     return readord
 
 def latestdate_fix():
-    import db
+    #import db
     datefix = []
     cnupdate = []
     myDB = db.DBConnection()
@@ -1230,7 +1265,7 @@ def latestdate_fix():
     return
 
 def upgrade_dynamic():
-    import db
+    #import db
     dynamic_comiclist = []
     myDB = db.DBConnection()
     #update the comicdb to include the Dynamic Names (and any futher changes as required)
@@ -1269,7 +1304,6 @@ def upgrade_dynamic():
 
 def checkFolder(folderpath=None):
     from mylar import PostProcessor
-    import Queue
 
     queue = Queue.Queue()
     #monitor a selected folder for 'snatched' files that haven't been processed
@@ -1315,7 +1349,7 @@ def LoadAlternateSearchNames(seriesname_alt, comicid):
         return Alternate_Names
 
 def havetotals(refreshit=None):
-        import db
+        #import db
 
         comics = []
         myDB = db.DBConnection()
@@ -1424,7 +1458,9 @@ def havetotals(refreshit=None):
                            "percent":         percent,
                            "totalissues":     totalissues,
                            "haveissues":      haveissues,
-                           "DateAdded":       comic['LastUpdated']})
+                           "DateAdded":       comic['LastUpdated'],
+                           "Type":            comic['Type'],
+                           "Corrected_Type":   comic['Corrected_Type']})
 
         return comics
 
@@ -1498,7 +1534,7 @@ def IssueDetails(filelocation, IssueID=None, justinfo=False):
                                 cover = "found"
                                 break
 
-                    elif any(['001.jpg' in infile, '001.png' in infile, '001.webp' in infile, '01.jpg' in infile, '01.png' in infile, '01.webp' in infile]) and cover == "notfound":
+                    elif (any(['001.jpg' in infile, '001.png' in infile, '001.webp' in infile, '01.jpg' in infile, '01.png' in infile, '01.webp' in infile]) or all(['0001' in infile, infile.endswith(pic_extensions)]) or all(['01' in infile, infile.endswith(pic_extensions)])) and cover == "notfound":
                         logger.fdebug('Extracting primary image ' + infile + ' as coverfile for display.')
                         local_file = open(os.path.join(mylar.CONFIG.CACHE_DIR, 'temp.jpg'), "wb")
                         local_file.write(inzipfile.read(infile))
@@ -1508,6 +1544,7 @@ def IssueDetails(filelocation, IssueID=None, justinfo=False):
                 if cover != "found":
                     logger.fdebug('Invalid naming sequence for jpgs discovered. Attempting to find the lowest sequence and will use as cover (it might not work). Currently : ' + str(low_infile))
                     local_file = open(os.path.join(mylar.CONFIG.CACHE_DIR, 'temp.jpg'), "wb")
+                    logger.fdebug('infile_name used for displaying: %s' % low_infile_name)
                     local_file.write(inzipfile.read(low_infile_name))
                     local_file.close
                     cover = "found"                
@@ -1801,7 +1838,7 @@ def IssueDetails(filelocation, IssueID=None, justinfo=False):
     return issuedetails
 
 def get_issue_title(IssueID=None, ComicID=None, IssueNumber=None, IssueArcID=None):
-    import db
+    #import db
     myDB = db.DBConnection()
     if IssueID:
         issue = myDB.selectone('SELECT * FROM issues WHERE IssueID=?', [IssueID]).fetchone()
@@ -1833,7 +1870,7 @@ def int_num(s):
         return float(s)
 
 def listPull(weeknumber, year):
-    import db
+    #import db
     library = {}
     myDB = db.DBConnection()
     # Get individual comics
@@ -1842,21 +1879,35 @@ def listPull(weeknumber, year):
         library[row['ComicID']] = row['ComicID']
     return library
 
-def listLibrary():
-    import db
+def listLibrary(comicid=None):
+    #import db
     library = {}
     myDB = db.DBConnection()
-    list = myDB.select("SELECT a.comicid, b.releasecomicid, a.status FROM Comics AS a LEFT JOIN annuals AS b on a.comicid=b.comicid group by a.comicid")
+    if comicid is None:
+        if mylar.CONFIG.ANNUALS_ON is True:
+            list = myDB.select("SELECT a.comicid, b.releasecomicid, a.status FROM Comics AS a LEFT JOIN annuals AS b on a.comicid=b.comicid group by a.comicid")
+        else:
+            list = myDB.select("SELECT comicid, status FROM Comics group by comicid")
+    else:
+        if mylar.CONFIG.ANNUALS_ON is True:
+            list = myDB.select("SELECT a.comicid, b.releasecomicid, a.status FROM Comics AS a LEFT JOIN annuals AS b on a.comicid=b.comicid WHERE a.comicid=? group by a.comicid", [re.sub('4050-', '', comicid).strip()])
+        else:
+            list = myDB.select("SELECT comicid, status FROM Comics WHERE comicid=? group by comicid", [re.sub('4050-', '', comicid).strip()])
+
     for row in list:
         library[row['ComicID']] = {'comicid':        row['ComicID'],
                                    'status':         row['Status']}
-        if row['ReleaseComicID'] is not None:
-            library[row['ReleaseComicID']] = {'comicid':   row['ComicID'],
-                                              'status':    row['Status']}
+        try:
+            if row['ReleaseComicID'] is not None:
+                library[row['ReleaseComicID']] = {'comicid':   row['ComicID'],
+                                                  'status':    row['Status']}
+        except:
+            pass
+
     return library
 
 def listStoryArcs():
-    import db
+    #import db
     library = {}
     myDB = db.DBConnection()
     # Get Distinct Arc IDs
@@ -1870,7 +1921,7 @@ def listStoryArcs():
     return library
 
 def listoneoffs(weeknumber, year):
-    import db
+    #import db
     library = []
     myDB = db.DBConnection()
     # Get Distinct one-off issues from the pullist that have already been downloaded / snatched
@@ -1886,7 +1937,7 @@ def listoneoffs(weeknumber, year):
     return library
 
 def manualArc(issueid, reading_order, storyarcid):
-    import db
+    #import db
     if issueid.startswith('4000-'):
         issueid = issueid[5:]
 
@@ -2022,7 +2073,7 @@ def manualArc(issueid, reading_order, storyarcid):
     return
 
 def listIssues(weeknumber, year):
-    import db
+    #import db
     library = []
     myDB = db.DBConnection()
     # Get individual issues
@@ -2067,7 +2118,7 @@ def listIssues(weeknumber, year):
     return library
 
 def incr_snatched(ComicID):
-    import db
+    #import db
     myDB = db.DBConnection()
     incr_count = myDB.selectone("SELECT Have FROM Comics WHERE ComicID=?", [ComicID]).fetchone()
     logger.fdebug('Incrementing HAVE count total to : ' + str(incr_count['Have'] + 1))
@@ -2083,7 +2134,7 @@ def duplicate_filecheck(filename, ComicID=None, IssueID=None, StoryArcID=None, r
     #storyarcid = the storyarcid of the issue that's being checked for duplication.
     #rtnval = the return value of a previous duplicate_filecheck that's re-running against new values
     #
-    import db
+    #import db
     myDB = db.DBConnection()
 
     logger.info('[DUPECHECK] Duplicate check for ' + filename)
@@ -2361,7 +2412,7 @@ def humanize_time(amount, units = 'seconds'):
     return buf
 
 def issue_status(IssueID):
-    import db
+    #import db
     myDB = db.DBConnection()
 
     IssueID = str(IssueID)
@@ -2395,7 +2446,7 @@ def crc(filename):
     return hashlib.md5(filename).hexdigest()
 
 def issue_find_ids(ComicName, ComicID, pack, IssueNumber):
-    import db
+    #import db
 
     myDB = db.DBConnection()
 
@@ -2522,7 +2573,7 @@ def cleanHost(host, protocol = True, ssl = False, username = None, password = No
     return host
 
 def checkthe_id(comicid=None, up_vals=None):
-    import db
+    #import db
     myDB = db.DBConnection()
     if not up_vals:
         chk = myDB.selectone("SELECT * from ref32p WHERE ComicID=?", [comicid]).fetchone()
@@ -2553,7 +2604,7 @@ def checkthe_id(comicid=None, up_vals=None):
         myDB.upsert("ref32p", newVal, ctrlVal)
 
 def updatearc_locs(storyarcid, issues):
-    import db
+    #import db
     myDB = db.DBConnection()
     issuelist = []
     for x in issues:
@@ -2643,7 +2694,7 @@ def updatearc_locs(storyarcid, issues):
 
 
 def spantheyears(storyarcid):
-    import db
+    #import db
     myDB = db.DBConnection()
 
     totalcnt = myDB.select("SELECT * FROM storyarcs WHERE StoryArcID=?", [storyarcid])
@@ -2707,7 +2758,7 @@ def arcformat(arc, spanyears, publisher):
     return dstloc
 
 def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
-    import db
+    #import db
     from base64 import b16encode, b32decode
 
     #check the status of the issueid to make sure it's in Snatched status and was grabbed via torrent.
@@ -2865,15 +2916,29 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
     torrent_info['snatch_status'] = snatch_status
     return torrent_info
 
-def weekly_info(week=None, year=None):
+def weekly_info(week=None, year=None, current=None):
     #find the current week and save it as a reference point.
     todaydate = datetime.datetime.today()
     current_weeknumber = todaydate.strftime("%U")
-
+    if current is not None:
+        c_weeknumber = int(current[:current.find('-')])
+        c_weekyear = int(current[current.find('-')+1:])
+    else:
+        c_weeknumber = week
+        c_weekyear = year
 
     if week:
         weeknumber = int(week)
         year = int(year)
+
+        #monkey patch for 2018/2019 - week 52/week 0
+        if all([weeknumber == 52, c_weeknumber == 51, c_weekyear == 2018]):
+            weeknumber = 0
+            year = 2019
+        elif all([weeknumber == 52, c_weeknumber == 0, c_weekyear == 2019]):
+            weeknumber = 51
+            year = 2018
+
         #view specific week (prev_week, next_week)
         startofyear = date(year,1,1)
         week0 = startofyear - timedelta(days=startofyear.isoweekday())
@@ -2884,11 +2949,20 @@ def weekly_info(week=None, year=None):
     else:
         #find the given week number for the current day
         weeknumber = current_weeknumber
+        year = todaydate.strftime("%Y")
+
+        #monkey patch for 2018/2019 - week 52/week 0
+        if all([weeknumber == 52, c_weeknumber == 51, c_weekyear == 2018]):
+            weeknumber = 0
+            year = 2019
+        elif all([weeknumber == 52, c_weeknumber == 0, c_weekyear == 2019]):
+            weeknumber = 51
+            year = 2018
+
         stweek = datetime.datetime.strptime(todaydate.strftime('%Y-%m-%d'), '%Y-%m-%d')
         startweek = stweek - timedelta(days = (stweek.weekday() + 1) % 7)
         midweek = startweek + timedelta(days = 3)
         endweek = startweek + timedelta(days = 6)
-        year = todaydate.strftime("%Y")
 
     prev_week = int(weeknumber) - 1
     prev_year = year
@@ -2946,7 +3020,7 @@ def weekly_info(week=None, year=None):
     return weekinfo
 
 def latestdate_update():
-    import db
+    #import db
     myDB = db.DBConnection()
     ccheck = myDB.select('SELECT a.ComicID, b.IssueID, a.LatestDate, b.ReleaseDate, b.Issue_Number from comics as a left join issues as b on a.comicid=b.comicid where a.LatestDate < b.ReleaseDate or a.LatestDate like "%Unknown%" group by a.ComicID')
     if ccheck is None or len(ccheck) == 0:
@@ -2967,6 +3041,66 @@ def latestdate_update():
         logger.info('updating latest date for : ' + a['ComicID'] + ' to ' + a['LatestDate'] + ' #' + a['LatestIssue'])
         myDB.upsert("comics", newVal, ctrlVal)
 
+def ddl_downloader(queue):
+    myDB = db.DBConnection()
+    while True:
+        if mylar.DDL_LOCK is True:
+            time.sleep(5)
+
+        elif mylar.DDL_LOCK is False and queue.qsize() >= 1:
+            item = queue.get(True)
+            if item == 'exit':
+                logger.info('Cleaning up workers for shutdown')
+                break
+            logger.info('Now loading request from DDL queue: %s' % item['series'])
+
+            #write this to the table so we have a record of what's going on.
+            ctrlval = {'id':      item['id']}
+            val = {'status':       'Downloading',
+                   'updated_date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
+            myDB.upsert('ddl_info', val, ctrlval)
+
+            ddz = getcomics.GC()
+            ddzstat = ddz.downloadit(item['id'], item['link'], item['mainlink'], item['resume'])
+
+            if ddzstat['success'] is True:
+                tdnow = datetime.datetime.now()
+                nval = {'status':  'Completed',
+                        'updated_date': tdnow.strftime('%Y-%m-%d %H:%M')}
+                myDB.upsert('ddl_info', nval, ctrlval)
+
+            if all([ddzstat['success'] is True, mylar.CONFIG.POST_PROCESSING is True]):
+                try:
+                    if ddzstat['filename'] is None:
+                        logger.info('%s successfully downloaded - now initiating post-processing.' % (os.path.basename(ddzstat['path'])))
+                        mylar.PP_QUEUE.put({'nzb_name':     os.path.basename(ddzstat['path']),
+                                            'nzb_folder':   ddzstat['path'],
+                                            'failed':       False,
+                                            'issueid':      None,
+                                            'comicid':      item['comicid'],
+                                            'apicall':      True,
+                                            'ddl':          True})
+                    else:
+                        logger.info('%s successfully downloaded - now initiating post-processing.' % (ddzstat['filename']))
+                        mylar.PP_QUEUE.put({'nzb_name':     ddzstat['filename'],
+                                            'nzb_folder':   ddzstat['path'],
+                                            'failed':       False,
+                                            'issueid':      item['issueid'],
+                                            'comicid':      item['comicid'],
+                                            'apicall':      True,
+                                            'ddl':          True})
+                except Exception as e:
+                    logger.info('process error: %s [%s]' %(e, ddzstat))
+            elif all([ddzstat['success'] is True, mylar.CONFIG.POST_PROCESSING is False]):
+                logger.info('File successfully downloaded. Post Processing is not enabled - item retained here: %s' % os.path.join(ddzstat['path'],ddzstat['filename']))
+            else:
+                logger.info('[Status: %s] Failed to download: %s ' % (ddzstat['success'], ddzstat))
+                nval = {'status':  'Failed',
+                        'updated_date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
+                myDB.upsert('ddl_info', nval, ctrlval)
+        else:
+            time.sleep(5)
+
 def postprocess_main(queue):
     while True:
         if mylar.APILOCK is True:
@@ -2980,7 +3114,10 @@ def postprocess_main(queue):
                 break
 
             if mylar.APILOCK is False:
-                pprocess = process.Process(item['nzb_name'], item['nzb_folder'], item['failed'], item['issueid'], item['comicid'], item['apicall'])
+                try:
+                    pprocess = process.Process(item['nzb_name'], item['nzb_folder'], item['failed'], item['issueid'], item['comicid'], item['apicall'], item['ddl'])
+                except:
+                    pprocess = process.Process(item['nzb_name'], item['nzb_folder'], item['failed'], item['issueid'], item['comicid'], item['apicall'])
                 pp = pprocess.post_process()
                 time.sleep(5) #arbitrary sleep to let the process attempt to finish pp'ing
 
@@ -2998,11 +3135,11 @@ def search_queue(queue):
 
         elif mylar.SEARCHLOCK is False and queue.qsize() >= 1: #len(queue) > 1:
             item = queue.get(True)
-            logger.info('[SEARCH-QUEUE] Now loading item from search queue: %s' % item)
             if item == 'exit':
                 logger.info('[SEARCH-QUEUE] Cleaning up workers for shutdown')
                 break
 
+            logger.info('[SEARCH-QUEUE] Now loading item from search queue: %s' % item)
             if mylar.SEARCHLOCK is False:
                 ss_queue = mylar.search.searchforissue(item['issueid'])
                 time.sleep(5) #arbitrary sleep to let the process attempt to finish pp'ing
@@ -3016,58 +3153,66 @@ def search_queue(queue):
 
 def worker_main(queue):
     while True:
-        item = queue.get(True)
-        logger.info('Now loading from queue: ' + item)
-        if item == 'exit':
-            logger.info('Cleaning up workers for shutdown')
-            break
-        snstat = torrentinfo(torrent_hash=item, download=True)
-        if snstat['snatch_status'] == 'IN PROGRESS':
-            logger.info('Still downloading in client....let us try again momentarily.')
-            time.sleep(30)
-            mylar.SNATCHED_QUEUE.put(item)
-        elif any([snstat['snatch_status'] == 'MONITOR FAIL', snstat['snatch_status'] == 'MONITOR COMPLETE']):
-            logger.info('File copied for post-processing - submitting as a direct pp.')
-            threading.Thread(target=self.checkFolder, args=[os.path.abspath(os.path.join(snstat['copied_filepath'], os.pardir))]).start()
+        if queue.qsize() >= 1:
+            item = queue.get(True)
+            logger.info('Now loading from queue: ' + item)
+            if item == 'exit':
+                logger.info('Cleaning up workers for shutdown')
+                break
+            snstat = torrentinfo(torrent_hash=item, download=True)
+            if snstat['snatch_status'] == 'IN PROGRESS':
+                logger.info('Still downloading in client....let us try again momentarily.')
+                time.sleep(30)
+                mylar.SNATCHED_QUEUE.put(item)
+            elif any([snstat['snatch_status'] == 'MONITOR FAIL', snstat['snatch_status'] == 'MONITOR COMPLETE']):
+                logger.info('File copied for post-processing - submitting as a direct pp.')
+                threading.Thread(target=self.checkFolder, args=[os.path.abspath(os.path.join(snstat['copied_filepath'], os.pardir))]).start()
+        else:
+            time.sleep(15)
 
 def nzb_monitor(queue):
     while True:
-        item = queue.get(True)
-        logger.info('Now loading from queue: %s' % item)
-        if item == 'exit':
-            logger.info('Cleaning up workers for shutdown')
-            break
-        if all([mylar.USE_SABNZBD is True, mylar.CONFIG.SAB_CLIENT_POST_PROCESSING is True]):
-           nz = sabnzbd.SABnzbd(item)
-           nzstat = nz.processor()
-        elif all([mylar.USE_NZBGET is True, mylar.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]):
-           nz = nzbget.NZBGet()
-           nzstat = nz.processor(item)
-        else:
-           logger.warn('There are no NZB Completed Download handlers enabled. Not sending item to completed download handling...')
-           break
-
-        if nzstat['status'] is False:
-            logger.info('Could not find NZBID %s in the downloader\'s queue. I will requeue this item for post-processing...' % item['NZBID'])
-            time.sleep(5)
-            mylar.NZB_QUEUE.put(item)
-        elif nzstat['status'] is True:
-            if nzstat['failed'] is False:
-                logger.info('File successfully downloaded - now initiating completed downloading handling.')
+        if queue.qsize() >= 1:
+            item = queue.get(True)
+            if item == 'exit':
+                logger.info('Cleaning up workers for shutdown')
+                break
+            logger.info('Now loading from queue: %s' % item)
+            if all([mylar.USE_SABNZBD is True, mylar.CONFIG.SAB_CLIENT_POST_PROCESSING is True]):
+                nz = sabnzbd.SABnzbd(item)
+                nzstat = nz.processor()
+            elif all([mylar.USE_NZBGET is True, mylar.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]):
+                nz = nzbget.NZBGet()
+                nzstat = nz.processor(item)
             else:
-                logger.info('File failed either due to being corrupt or incomplete - now initiating completed failed downloading handling.')
-            try:
-                mylar.PP_QUEUE.put({'nzb_name':     nzstat['name'],
-                                    'nzb_folder':   nzstat['location'],
-                                    'failed':       nzstat['failed'],
-                                    'issueid':      nzstat['issueid'],
-                                    'comicid':      nzstat['comicid'],
-                                    'apicall':      nzstat['apicall']})
-                #cc = process.Process(nzstat['name'], nzstat['location'], failed=nzstat['failed'])
-                #nzpp = cc.post_process()
-            except Exception as e:
-                logger.info('process error: %s' % e)
+                logger.warn('There are no NZB Completed Download handlers enabled. Not sending item to completed download handling...')
+                break
 
+            if any([nzstat['status'] == 'file not found', nzstat['status'] == 'double-pp']):
+                logger.warn('Unable to complete post-processing call due to not finding file in the location provided. [%s]' % item)
+            elif nzstat['status'] is False:
+                logger.info('Could not find NZBID %s in the downloader\'s queue. I will requeue this item for post-processing...' % item['NZBID'])
+                time.sleep(5)
+                mylar.NZB_QUEUE.put(item)
+            elif nzstat['status'] is True:
+                if nzstat['failed'] is False:
+                    logger.info('File successfully downloaded - now initiating completed downloading handling.')
+                else:
+                    logger.info('File failed either due to being corrupt or incomplete - now initiating completed failed downloading handling.')
+                try:
+                    mylar.PP_QUEUE.put({'nzb_name':     nzstat['name'],
+                                        'nzb_folder':   nzstat['location'],
+                                        'failed':       nzstat['failed'],
+                                        'issueid':      nzstat['issueid'],
+                                        'comicid':      nzstat['comicid'],
+                                        'apicall':      nzstat['apicall'],
+                                        'ddl':          False})
+                    #cc = process.Process(nzstat['name'], nzstat['location'], failed=nzstat['failed'])
+                    #nzpp = cc.post_process()
+                except Exception as e:
+                    logger.info('process error: %s' % e)
+        else:
+            time.sleep(5)
 
 def script_env(mode, vars):
     #mode = on-snatch, pre-postprocess, post-postprocess
@@ -3211,7 +3356,8 @@ def disable_provider(site, newznab=False):
             mylar.CONFIG.DOGNZB = False
         elif site == 'experimental':
             mylar.CONFIG.EXPERIMENTAL = False
-
+        elif site == '32P':
+            mylar.CONFIG.ENABLE_32P = False
 
 def date_conversion(originaldate):
     c_obj_date = datetime.datetime.strptime(originaldate, "%Y-%m-%d %H:%M:%S")
@@ -3223,13 +3369,16 @@ def date_conversion(originaldate):
 def job_management(write=False, job=None, last_run_completed=None, current_run=None, status=None):
         jobresults = []
 
-        import db
+        #import db
         myDB = db.DBConnection()
 
         if job is None:
             dbupdate_newstatus = 'Waiting'
             dbupdate_nextrun = None
-            rss_newstatus = 'Waiting'
+            if mylar.CONFIG.ENABLE_RSS is True:
+                rss_newstatus = 'Waiting'
+            else:
+                rss_newstatus = 'Paused'
             rss_nextrun = None
             weekly_newstatus = 'Waiting'
             weekly_nextrun = None
@@ -3237,7 +3386,10 @@ def job_management(write=False, job=None, last_run_completed=None, current_run=N
             search_nextrun = None
             version_newstatus = 'Waiting'
             version_nextrun = None
-            monitor_newstatus = 'Waiting'
+            if mylar.CONFIG.ENABLE_CHECK_FOLDER is True:
+                monitor_newstatus = 'Waiting'
+            else:
+                monitor_newstatus = 'Paused'
             monitor_nextrun = None
 
             job_info = myDB.select('SELECT DISTINCT * FROM jobhistory')
@@ -3247,31 +3399,37 @@ def job_management(write=False, job=None, last_run_completed=None, current_run=N
                     if mylar.SCHED_DBUPDATE_LAST is None:
                         mylar.SCHED_DBUPDATE_LAST = ji['prev_run_timestamp']
                     dbupdate_newstatus = ji['status']
+                    mylar.UPDATER_STATUS = dbupdate_newstatus
                     dbupdate_nextrun = ji['next_run_timestamp']
                 elif 'search' in ji['JobName'].lower():
                     if mylar.SCHED_SEARCH_LAST is None:
                         mylar.SCHED_SEARCH_LAST = ji['prev_run_timestamp']
                     search_newstatus = ji['status']
+                    mylar.SEARCH_STATUS = search_newstatus
                     search_nextrun = ji['next_run_timestamp']
                 elif 'rss' in ji['JobName'].lower():
                     if mylar.SCHED_RSS_LAST is None:
                         mylar.SCHED_RSS_LAST = ji['prev_run_timestamp']
                     rss_newstatus = ji['status']
+                    mylar.RSS_STATUS = rss_newstatus
                     rss_nextrun = ji['next_run_timestamp']
                 elif 'weekly' in ji['JobName'].lower():
                     if mylar.SCHED_WEEKLY_LAST is None:
                         mylar.SCHED_WEEKLY_LAST = ji['prev_run_timestamp']
                     weekly_newstatus = ji['status']
+                    mylar.WEEKLY_STATUS = weekly_newstatus
                     weekly_nextrun = ji['next_run_timestamp']
                 elif 'version' in ji['JobName'].lower():
                     if mylar.SCHED_VERSION_LAST is None:
                         mylar.SCHED_VERSION_LAST = ji['prev_run_timestamp']
                     version_newstatus = ji['status']
+                    mylar.VERSION_STATUS = version_newstatus
                     version_nextrun = ji['next_run_timestamp']
                 elif 'monitor' in ji['JobName'].lower():
                     if mylar.SCHED_MONITOR_LAST is None:
                         mylar.SCHED_MONITOR_LAST = ji['prev_run_timestamp']
                     monitor_newstatus = ji['status']
+                    mylar.MONITOR_STATUS = monitor_newstatus
                     monitor_nextrun = ji['next_run_timestamp']
 
             monitors = {'weekly': mylar.SCHED_WEEKLY_LAST,
@@ -3290,21 +3448,27 @@ def job_management(write=False, job=None, last_run_completed=None, current_run=N
                 elif 'update' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_DBUPDATE_LAST
                     newstatus = dbupdate_newstatus
+                    mylar.UPDATER_STATUS = newstatus
                 elif 'search' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_SEARCH_LAST
                     newstatus = search_newstatus
+                    mylar.SEARCH_STATUS = newstatus
                 elif 'rss' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_RSS_LAST
                     newstatus = rss_newstatus
+                    mylar.RSS_STATUS = newstatus
                 elif 'weekly' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_WEEKLY_LAST
                     newstatus = weekly_newstatus
+                    mylar.WEEKLY_STATUS = newstatus
                 elif 'version' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_VERSION_LAST
                     newstatus = version_newstatus
+                    mylar.VERSION_STATUS = newstatus
                 elif 'monitor' in jobinfo.lower():
                     prev_run_timestamp = mylar.SCHED_MONITOR_LAST
                     newstatus = monitor_newstatus
+                    mylar.MONITOR_STATUS = newstatus
 
                 jobname = jobinfo[:jobinfo.find('(')-1].strip()
                 #logger.fdebug('jobinfo: %s' % jobinfo)
@@ -3422,7 +3586,7 @@ def job_management(write=False, job=None, last_run_completed=None, current_run=N
 
 
 def stupidchk():
-    import db
+    #import db
     myDB = db.DBConnection()
     CCOMICS = myDB.select("SELECT COUNT(*) FROM comics WHERE Status='Active'")
     ens = myDB.select("SELECT COUNT(*) FROM comics WHERE Status='Loading' OR Status='Paused'")
@@ -3498,12 +3662,12 @@ def getImage(comicid, url, issueid=None):
         #let's make the dir.
         try:
             os.makedirs(str(mylar.CONFIG.CACHE_DIR))
-            logger.info('Cache Directory successfully created at: ' + str(mylar.CONFIG.CACHE_DIR))
+            logger.info('Cache Directory successfully created at: %s' % mylar.CONFIG.CACHE_DIR)
 
         except OSError:
-            logger.error('Could not create cache dir. Check permissions of cache dir: ' + str(mylar.CONFIG.CACHE_DIR))
+            logger.error('Could not create cache dir. Check permissions of cache dir: %s' % mylar.CONFIG.CACHE_DIR)
 
-    coverfile = os.path.join(mylar.CONFIG.CACHE_DIR,  str(comicid) + ".jpg")
+    coverfile = os.path.join(mylar.CONFIG.CACHE_DIR,  str(comicid) + '.jpg')
 
     #if cover has '+' in url it's malformed, we need to replace '+' with '%20' to retreive properly.
 
@@ -3516,35 +3680,42 @@ def getImage(comicid, url, issueid=None):
     logger.info('Attempting to retrieve the comic image for series')
     try:
         r = requests.get(url, params=None, stream=True, verify=mylar.CONFIG.CV_VERIFY, headers=mylar.CV_HEADERS)
-    except Exception, e:
-        logger.warn('Unable to download image from CV URL link: ' + url + ' [Status Code returned: ' + str(r.status_code) + ']')
-
-    logger.fdebug('comic image retrieval status code: ' + str(r.status_code))
-
-    if str(r.status_code) != '200':
-        logger.warn('Unable to download image from CV URL link: ' + url + ' [Status Code returned: ' + str(r.status_code) + ']')
+    except Exception as e:
+        logger.warn('[ERROR: %s] Unable to download image from CV URL link: %s' % (e, url))
         coversize = 0
+        statuscode = '400'
     else:
-        if r.headers.get('Content-Encoding') == 'gzip':
-            buf = StringIO(r.content)
-            f = gzip.GzipFile(fileobj=buf)
+        statuscode = str(r.status_code)
+        logger.fdebug('comic image retrieval status code: %s' % statuscode)
 
-        with open(coverfile, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=1024):
-                if chunk: # filter out keep-alive new chunks
-                    f.write(chunk)
-                    f.flush()
-
-
-        statinfo = os.stat(coverfile)
-        coversize = statinfo.st_size
-
-    if int(coversize) < 30000 or str(r.status_code) != '200':
-        if str(r.status_code) != '200':
-            logger.info('Trying to grab an alternate cover due to problems trying to retrieve the main cover image.')
+        if statuscode != '200':
+            logger.warn('Unable to download image from CV URL link: %s [Status Code returned: %s]' % (url, statuscode))
+            coversize = 0
         else:
-            logger.info('Image size invalid [' + str(coversize) + ' bytes] - trying to get alternate cover image.')
-        logger.fdebug('invalid image link is here: ' + url)
+            if r.headers.get('Content-Encoding') == 'gzip':
+                buf = StringIO(r.content)
+                f = gzip.GzipFile(fileobj=buf)
+
+            with open(coverfile, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk: # filter out keep-alive new chunks
+                        f.write(chunk)
+                        f.flush()
+
+
+            statinfo = os.stat(coverfile)
+            coversize = statinfo.st_size
+
+    if any([int(coversize) < 10000, statuscode != '200']):
+        try:
+            if statuscode != '200':
+                logger.info('Trying to grab an alternate cover due to problems trying to retrieve the main cover image.')
+            else:
+                logger.info('Image size invalid [%s bytes] - trying to get alternate cover image.' % coversize)
+        except Exception as e:
+            logger.info('Image size invalid [%s bytes] - trying to get alternate cover image.' % coversize)
+
+        logger.fdebug('invalid image link is here: %s' % url)
 
         if os.path.exists(coverfile):
             os.remove(coverfile)
@@ -3736,7 +3907,7 @@ def publisherImages(publisher):
     return comicpublisher
 
 def lookupthebitches(filelist, folder, nzbname, nzbid, prov, hash, pulldate):
-    import db
+    #import db
     myDB = db.DBConnection()
     watchlist = listLibrary()
     matchlist = []
@@ -3774,6 +3945,18 @@ def lookupthebitches(filelist, folder, nzbname, nzbid, prov, hash, pulldate):
             mylar.updater.nzblog(x['issueid'], nzbname, x['comicname'], id=nzbid, prov=prov, oneoff=oneoff)
             mylar.updater.foundsearch(x['comicid'], x['issueid'], mode=mode, provider=prov, hash=hash)
 
+
+def DateAddedFix():
+    #import db
+    myDB = db.DBConnection()
+    DA_A = datetime.datetime.today()
+    DateAdded = DA_A.strftime('%Y-%m-%d')
+    issues = myDB.select("SELECT IssueID FROM issues WHERE Status='Wanted' and DateAdded is NULL")
+    for da in issues:
+        myDB.upsert("issues", {'DateAdded': DateAdded}, {'IssueID': da[0]})
+    annuals = myDB.select("SELECT IssueID FROM annuals WHERE Status='Wanted' and DateAdded is NULL")
+    for an in annuals:
+        myDB.upsert("annuals", {'DateAdded': DateAdded}, {'IssueID': an[0]})
 
 def file_ops(path,dst,arc=False,one_off=False):
 #    # path = source path + filename
@@ -3918,7 +4101,6 @@ def file_ops(path,dst,arc=False,one_off=False):
 
     else:
         return False
-
 
 from threading import Thread
 

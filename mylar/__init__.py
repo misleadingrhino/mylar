@@ -22,6 +22,7 @@ import os, sys, subprocess
 
 import threading
 import datetime
+from datetime import timedelta
 import webbrowser
 import sqlite3
 import itertools
@@ -31,7 +32,6 @@ import Queue
 import platform
 import locale
 import re
-from threading import Lock, Thread
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -104,6 +104,7 @@ CV_HEADERS = None
 CVURL = None
 DEMURL = None
 WWTURL = None
+WWT_CF_COOKIEVALUE = None
 KEYS_32P = None
 AUTHKEY_32P = None
 FEED_32P = None
@@ -121,12 +122,16 @@ USE_WATCHDIR = False
 SNPOOL = None
 NZBPOOL = None
 SEARCHPOOL = None
+PPPOOL = None
+DDLPOOL = None
 SNATCHED_QUEUE = Queue.Queue()
 NZB_QUEUE = Queue.Queue()
 PP_QUEUE = Queue.Queue()
 SEARCH_QUEUE = Queue.Queue()
+DDL_QUEUE = Queue.Queue()
+SEARCH_TIER_DATE = None
 COMICSORT = None
-PULLBYFILE = None
+PULLBYFILE = False
 CFG = None
 CURRENT_WEEKNUMBER = None
 CURRENT_YEAR = None
@@ -139,6 +144,7 @@ LOCAL_IP = None
 DOWNLOAD_APIKEY = None
 APILOCK = False
 SEARCHLOCK = False
+DDL_LOCK = False
 CMTAGGER_PATH = None
 STATIC_COMICRN_VERSION = "1.01"
 STATIC_APC_VERSION = "2.04"
@@ -159,12 +165,13 @@ def initialize(config_file):
     with INIT_LOCK:
 
         global CONFIG, _INITIALIZED, QUIET, CONFIG_FILE, OS_DETECT, MAINTENANCE, CURRENT_VERSION, LATEST_VERSION, COMMITS_BEHIND, INSTALL_TYPE, IMPORTLOCK, PULLBYFILE, INKDROPS_32P, \
-               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
-               IMPORTBUTTON, IMPORT_FILES, IMPORT_TOTALFILES, IMPORT_CID_COUNT, IMPORT_PARSED_COUNT, IMPORT_FAILURE_COUNT, CHECKENABLED, CVURL, DEMURL, WWTURL, \
+               DONATEBUTTON, CURRENT_WEEKNUMBER, CURRENT_YEAR, UMASK, USER_AGENT, SNATCHED_QUEUE, NZB_QUEUE, PP_QUEUE, SEARCH_QUEUE, DDL_QUEUE, PULLNEW, COMICSORT, WANTED_TAB_OFF, CV_HEADERS, \
+               IMPORTBUTTON, IMPORT_FILES, IMPORT_TOTALFILES, IMPORT_CID_COUNT, IMPORT_PARSED_COUNT, IMPORT_FAILURE_COUNT, CHECKENABLED, CVURL, DEMURL, WWTURL, WWT_CF_COOKIEVALUE, \
+               DDLPOOL, NZBPOOL, SNPOOL, PPPOOL, SEARCHPOOL, \
                USE_SABNZBD, USE_NZBGET, USE_BLACKHOLE, USE_RTORRENT, USE_UTORRENT, USE_QBITTORRENT, USE_DELUGE, USE_TRANSMISSION, USE_WATCHDIR, SAB_PARAMS, \
                PROG_DIR, DATA_DIR, CMTAGGER_PATH, DOWNLOAD_APIKEY, LOCAL_IP, STATIC_COMICRN_VERSION, STATIC_APC_VERSION, KEYS_32P, AUTHKEY_32P, FEED_32P, FEEDINFO_32P, \
-               MONITOR_STATUS, SEARCH_STATUS, RSS_STATUS, WEEKLY_STATUS, VERSION_STATUS, UPDATER_STATUS, DBUPDATE_INTERVAL, LOG_LANG, LOG_CHARSET, APILOCK, SEARCHLOCK, LOG_LEVEL, \
-               SCHED_RSS_LAST, SCHED_WEEKLY_LAST, SCHED_MONITOR_LAST, SCHED_SEARCH_LAST, SCHED_VERSION_LAST, SCHED_DBUPDATE_LAST, COMICINFO
+               MONITOR_STATUS, SEARCH_STATUS, RSS_STATUS, WEEKLY_STATUS, VERSION_STATUS, UPDATER_STATUS, DBUPDATE_INTERVAL, LOG_LANG, LOG_CHARSET, APILOCK, SEARCHLOCK, DDL_LOCK, LOG_LEVEL, \
+               SCHED_RSS_LAST, SCHED_WEEKLY_LAST, SCHED_MONITOR_LAST, SCHED_SEARCH_LAST, SCHED_VERSION_LAST, SCHED_DBUPDATE_LAST, COMICINFO, SEARCH_TIER_DATE
 
         cc = mylar.config.Config(config_file)
         CONFIG = cc.read(startup=True)
@@ -229,11 +236,18 @@ def initialize(config_file):
         CURRENT_WEEKNUMBER = todaydate.strftime("%U")
         CURRENT_YEAR = todaydate.strftime("%Y")
 
+        if SEARCH_TIER_DATE is None:
+            #tier the wanted listed so anything older than 14 days won't trigger the API during searches.
+            #utc_date = datetime.datetime.utcnow()
+            STD = todaydate - timedelta(days = 14)
+            SEARCH_TIER_DATE = STD.strftime('%Y-%m-%d')
+            logger.fdebug('SEARCH_TIER_DATE set to : %s' % SEARCH_TIER_DATE)
+
         #set the default URL for ComicVine API here.
         CVURL = 'https://comicvine.gamespot.com/api/'
 
         #set default URL for Public trackers (just in case it changes more frequently)
-        WWTURL = 'https://worldwidetorrents.me/'
+        WWTURL = 'https://worldwidetorrents.to/'
         DEMURL = 'https://www.demonoid.pw/'
 
         if CONFIG.LOCMOVE:
@@ -333,56 +347,49 @@ def start():
             SCHED_RSS_LAST = monitors['rss']
 
             # Start our scheduled background tasks
-            SCHED.add_job(func=updater.dbUpdate, id='dbupdater', name='DB Updater', args=[None,None,True], trigger=IntervalTrigger(hours=5, minutes=5, timezone='UTC'))
+            if UPDATER_STATUS != 'Paused':
+                SCHED.add_job(func=updater.dbUpdate, id='dbupdater', name='DB Updater', args=[None,None,True], trigger=IntervalTrigger(hours=0, minutes=5, timezone='UTC'))
+                logger.info('DB Updater sccheduled to fire every 5 minutes')
 
             #let's do a run at the Wanted issues here (on startup) if enabled.
-            ss = searchit.CurrentSearcher()
-            if CONFIG.NZB_STARTUP_SEARCH:
-                SCHED.add_job(func=ss.run, id='search', next_run_time=datetime.datetime.utcnow(), name='Auto-Search', trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
-            else:
-                if SCHED_SEARCH_LAST is not None:
-                    search_timestamp = float(SCHED_SEARCH_LAST)
-                    logger.fdebug('[AUTO-SEARCH] Search last run @ %s' % datetime.datetime.utcfromtimestamp(search_timestamp))
+            if SEARCH_STATUS != 'Paused':
+                ss = searchit.CurrentSearcher()
+                if CONFIG.NZB_STARTUP_SEARCH:
+                    SCHED.add_job(func=ss.run, id='search', next_run_time=datetime.datetime.utcnow(), name='Auto-Search', trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
                 else:
-                    search_timestamp = helpers.utctimestamp() + (int(CONFIG.SEARCH_INTERVAL) *60)
+                    if SCHED_SEARCH_LAST is not None:
+                        search_timestamp = float(SCHED_SEARCH_LAST)
+                        logger.fdebug('[AUTO-SEARCH] Search last run @ %s' % datetime.datetime.utcfromtimestamp(search_timestamp))
+                    else:
+                        search_timestamp = helpers.utctimestamp() + (int(CONFIG.SEARCH_INTERVAL) *60)
 
-                duration_diff = (helpers.utctimestamp() - search_timestamp)/60
-                if duration_diff >= int(CONFIG.SEARCH_INTERVAL):
-                    logger.fdebug('[AUTO-SEARCH]Auto-Search set to a delay of one minute before initialization as it has been %s minutes since the last run' % duration_diff)
-                    SCHED.add_job(func=ss.run, id='search', name='Auto-Search', trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
-                else:
-                    search_diff = datetime.datetime.utcfromtimestamp(helpers.utctimestamp() + ((int(CONFIG.SEARCH_INTERVAL) * 60)  - (duration_diff*60)))
-                    logger.fdebug('[AUTO-SEARCH] Scheduling next run @ %s every %s minutes' % (search_diff, CONFIG.SEARCH_INTERVAL))
-                    SCHED.add_job(func=ss.run, id='search', name='Auto-Search', next_run_time=search_diff, trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
+                    duration_diff = (helpers.utctimestamp() - search_timestamp)/60
+                    if duration_diff >= int(CONFIG.SEARCH_INTERVAL):
+                        logger.fdebug('[AUTO-SEARCH]Auto-Search set to a delay of one minute before initialization as it has been %s minutes since the last run' % duration_diff)
+                        SCHED.add_job(func=ss.run, id='search', name='Auto-Search', trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
+                    else:
+                        search_diff = datetime.datetime.utcfromtimestamp(helpers.utctimestamp() + ((int(CONFIG.SEARCH_INTERVAL) * 60)  - (duration_diff*60)))
+                        logger.fdebug('[AUTO-SEARCH] Scheduling next run @ %s every %s minutes' % (search_diff, CONFIG.SEARCH_INTERVAL))
+                        SCHED.add_job(func=ss.run, id='search', name='Auto-Search', next_run_time=search_diff, trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
+            else:
+                ss = searchit.CurrentSearcher()
+                SCHED.add_job(func=ss.run, id='search', name='Auto-Search', next_run_time=None, trigger=IntervalTrigger(hours=0, minutes=CONFIG.SEARCH_INTERVAL, timezone='UTC'))
+
+            #thread queue control..
+            queue_schedule('search_queue', 'start')
 
             if all([CONFIG.ENABLE_TORRENTS, CONFIG.AUTO_SNATCH, OS_DETECT != 'Windows']) and any([CONFIG.TORRENT_DOWNLOADER == 2, CONFIG.TORRENT_DOWNLOADER == 4]):
-                logger.info('[AUTO-SNATCHER] Auto-Snatch of completed torrents enabled & attempting to background load....')
-                SNPOOL = threading.Thread(target=helpers.worker_main, args=(SNATCHED_QUEUE,), name="AUTO-SNATCHER")
-                SNPOOL.start()
-                logger.info('[AUTO-SNATCHER] Succesfully started Auto-Snatch add-on - will now monitor for completed torrents on client....')
+                queue_schedule('snatched_queue', 'start')
 
             if CONFIG.POST_PROCESSING is True and ( all([CONFIG.NZB_DOWNLOADER == 0, CONFIG.SAB_CLIENT_POST_PROCESSING is True]) or all([CONFIG.NZB_DOWNLOADER == 1, CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]) ):
-                if CONFIG.NZB_DOWNLOADER == 0:
-                    logger.info('[SAB-MONITOR] Completed post-processing handling enabled for SABnzbd. Attempting to background load....')
-                elif CONFIG.NZB_DOWNLOADER == 1:
-                    logger.info('[NZBGET-MONITOR] Completed post-processing handling enabled for NZBGet. Attempting to background load....')
-                NZBPOOL = threading.Thread(target=helpers.nzb_monitor, args=(NZB_QUEUE,), name="AUTO-COMPLETE-NZB")
-                NZBPOOL.start()
-                if CONFIG.NZB_DOWNLOADER == 0:
-                    logger.info('[AUTO-COMPLETE-NZB] Succesfully started Completed post-processing handling for SABnzbd - will now monitor for completed nzbs within sabnzbd and post-process automatically....')
-                elif CONFIG.NZB_DOWNLOADER == 1:
-                    logger.info('[AUTO-COMPLETE-NZB] Succesfully started Completed post-processing handling for NZBGet - will now monitor for completed nzbs within nzbget and post-process automatically....')
+                queue_schedule('nzb_queue', 'start')
 
-            logger.info('[SEARCH-QUEUE] Attempting to background load the search queue....')
-            SEARCHPOOL = threading.Thread(target=helpers.search_queue, args=(SEARCH_QUEUE,), name="SEARCH-QUEUE")
-            SEARCHPOOL.start()
 
-            if all([CONFIG.POST_PROCESSING is True, CONFIG.API_ENABLED is True]):
-                logger.info('[POST-PROCESS-QUEUE] Post Process queue enabled & monitoring for api requests....')
-                PPPOOL = threading.Thread(target=helpers.postprocess_main, args=(PP_QUEUE,), name="POST-PROCESS-QUEUE")
-                PPPOOL.start()
-                logger.info('[POST-PROCESS-QUEUE] Succesfully started Post-Processing Queuer....')
+            if CONFIG.POST_PROCESSING is True:
+                queue_schedule('pp_queue', 'start')
 
+            if CONFIG.ENABLE_DDL is True:
+                queue_schedule('ddl_queue', 'start')
             helpers.latestdate_fix()
 
             if CONFIG.ALT_PULL == 2:
@@ -410,17 +417,18 @@ def start():
             ws = weeklypullit.Weekly()
             duration_diff = (weektimestamp - weekly_timestamp)/60
 
-            if abs(duration_diff) >= weekly_interval/60:
-                logger.info('[WEEKLY] Weekly Pull-Update initializing immediately as it has been %s hours since the last run' % abs(duration_diff/60))
-                SCHED.add_job(func=ws.run, id='weekly', name='Weekly Pullist', next_run_time=datetime.datetime.utcnow(), trigger=IntervalTrigger(hours=weektimer, minutes=0, timezone='UTC'))
-            else:
-                weekly_diff = datetime.datetime.utcfromtimestamp(weektimestamp + (weekly_interval - (duration_diff * 60)))
-                logger.fdebug('[WEEKLY] Scheduling next run for @ %s every %s hours' % (weekly_diff, weektimer))
-                SCHED.add_job(func=ws.run, id='weekly', name='Weekly Pullist', next_run_time=weekly_diff, trigger=IntervalTrigger(hours=weektimer, minutes=0, timezone='UTC'))
+            if WEEKLY_STATUS != 'Paused':
+                if abs(duration_diff) >= weekly_interval/60:
+                    logger.info('[WEEKLY] Weekly Pull-Update initializing immediately as it has been %s hours since the last run' % abs(duration_diff/60))
+                    SCHED.add_job(func=ws.run, id='weekly', name='Weekly Pullist', next_run_time=datetime.datetime.utcnow(), trigger=IntervalTrigger(hours=weektimer, minutes=0, timezone='UTC'))
+                else:
+                    weekly_diff = datetime.datetime.utcfromtimestamp(weektimestamp + (weekly_interval - (duration_diff * 60)))
+                    logger.fdebug('[WEEKLY] Scheduling next run for @ %s every %s hours' % (weekly_diff, weektimer))
+                    SCHED.add_job(func=ws.run, id='weekly', name='Weekly Pullist', next_run_time=weekly_diff, trigger=IntervalTrigger(hours=weektimer, minutes=0, timezone='UTC'))
 
             #initiate startup rss feeds for torrents/nzbs here...
             rs = rsscheckit.tehMain()
-            if CONFIG.ENABLE_RSS:
+            if CONFIG.ENABLE_RSS is True:
                 logger.info('[RSS-FEEDS] Initiating startup-RSS feed checks.')
                 if SCHED_RSS_LAST is not None:
                     rss_timestamp = float(SCHED_RSS_LAST)
@@ -434,13 +442,16 @@ def start():
                     rss_diff = datetime.datetime.utcfromtimestamp(helpers.utctimestamp() + (int(CONFIG.RSS_CHECKINTERVAL) * 60) - (duration_diff * 60))
                     logger.fdebug('[RSS-FEEDS] Scheduling next run for @ %s every %s minutes' % (rss_diff, CONFIG.RSS_CHECKINTERVAL))
                     SCHED.add_job(func=rs.run, id='rss', name='RSS Feeds', args=[True], next_run_time=rss_diff, trigger=IntervalTrigger(hours=0, minutes=int(CONFIG.RSS_CHECKINTERVAL), timezone='UTC'))
-            #else:
+            else:
+                 RSS_STATUS = 'Paused'
             #    SCHED.add_job(func=rs.run, id='rss', name='RSS Feeds', args=[True], trigger=IntervalTrigger(hours=0, minutes=int(CONFIG.RSS_CHECKINTERVAL), timezone='UTC'))
             #    SCHED.pause_job('rss')
 
             if CONFIG.CHECK_GITHUB:
                 vs = versioncheckit.CheckVersion()
                 SCHED.add_job(func=vs.run, id='version', name='Check Version', trigger=IntervalTrigger(hours=0, minutes=CONFIG.CHECK_GITHUB_INTERVAL, timezone='UTC'))
+            else:
+                VERSION_STATUS = 'Paused'
 
             ##run checkFolder every X minutes (basically Manual Run Post-Processing)
             if CONFIG.ENABLE_CHECK_FOLDER:
@@ -450,6 +461,8 @@ def start():
                     SCHED.add_job(func=fm.run, id='monitor', name='Folder Monitor', trigger=IntervalTrigger(hours=0, minutes=int(CONFIG.DOWNLOAD_SCAN_INTERVAL), timezone='UTC'))
                 else:
                     logger.error('[FOLDER MONITOR] You need to specify a monitoring time for the check folder option to work')
+            else:
+                MONITOR_STATUS = 'Paused'
 
             logger.info('Firing up the Background Schedulers now....')
             try:
@@ -463,6 +476,183 @@ def start():
 
         started = True
 
+def queue_schedule(queuetype, mode):
+
+    #global _INITIALIZED
+
+    if mode == 'start':
+        if queuetype == 'snatched_queue':
+            try:
+                if mylar.SNPOOL.isAlive() is True:
+                    return
+            except Exception as e:
+                pass
+
+            logger.info('[AUTO-SNATCHER] Auto-Snatch of completed torrents enabled & attempting to background load....')
+            mylar.SNPOOL = threading.Thread(target=helpers.worker_main, args=(SNATCHED_QUEUE,), name="AUTO-SNATCHER")
+            mylar.SNPOOL.start()
+            logger.info('[AUTO-SNATCHER] Succesfully started Auto-Snatch add-on - will now monitor for completed torrents on client....')
+
+        elif queuetype == 'nzb_queue':
+            try:
+                if mylar.NZBPOOL.isAlive() is True:
+                    return
+            except Exception as e:
+                pass
+
+            if CONFIG.NZB_DOWNLOADER == 0:
+                logger.info('[SAB-MONITOR] Completed post-processing handling enabled for SABnzbd. Attempting to background load....')
+            elif CONFIG.NZB_DOWNLOADER == 1:
+                logger.info('[NZBGET-MONITOR] Completed post-processing handling enabled for NZBGet. Attempting to background load....')
+            mylar.NZBPOOL = threading.Thread(target=helpers.nzb_monitor, args=(NZB_QUEUE,), name="AUTO-COMPLETE-NZB")
+            mylar.NZBPOOL.start()
+            if CONFIG.NZB_DOWNLOADER == 0:
+                logger.info('[AUTO-COMPLETE-NZB] Succesfully started Completed post-processing handling for SABnzbd - will now monitor for completed nzbs within sabnzbd and post-process automatically...')
+            elif CONFIG.NZB_DOWNLOADER == 1:
+                logger.info('[AUTO-COMPLETE-NZB] Succesfully started Completed post-processing handling for NZBGet - will now monitor for completed nzbs within nzbget and post-process automatically...')
+
+        elif queuetype == 'search_queue':
+            try:
+                if mylar.SEARCHPOOL.isAlive() is True:
+                    return
+            except Exception as e:
+                pass
+
+            logger.info('[SEARCH-QUEUE] Attempting to background load the search queue....')
+            mylar.SEARCHPOOL = threading.Thread(target=helpers.search_queue, args=(SEARCH_QUEUE,), name="SEARCH-QUEUE")
+            mylar.SEARCHPOOL.start()
+            logger.info('[SEARCH-QUEUE] Successfully started the Search Queuer...')
+        elif queuetype == 'pp_queue':
+            try:
+                if mylar.PPPOOL.isAlive() is True:
+                    return
+            except Exception as e:
+                pass
+
+            logger.info('[POST-PROCESS-QUEUE] Post Process queue enabled & monitoring for api requests....')
+            mylar.PPPOOL = threading.Thread(target=helpers.postprocess_main, args=(PP_QUEUE,), name="POST-PROCESS-QUEUE")
+            mylar.PPPOOL.start()
+            logger.info('[POST-PROCESS-QUEUE] Succesfully started Post-Processing Queuer....')
+
+        elif queuetype == 'ddl_queue':
+            try:
+                if mylar.DDLPOOL.isAlive() is True:
+                    return
+            except Exception as e:
+                pass
+
+            logger.info('[DDL-QUEUE] DDL Download queue enabled & monitoring for requests....')
+            mylar.DDLPOOL = threading.Thread(target=helpers.ddl_downloader, args=(DDL_QUEUE,), name="DDL-QUEUE")
+            mylar.DDLPOOL.start()
+            logger.info('[DDL-QUEUE:] Succesfully started DDL Download Queuer....')
+
+    else:
+        if (queuetype == 'nzb_queue') or mode == 'shutdown':
+            try:
+                if mylar.NZBPOOL.isAlive() is False:
+                    return
+                elif all([mode!= 'shutdown', mylar.CONFIG.POST_PROCESSING is True]) and ( all([mylar.CONFIG.NZB_DOWNLOADER == 0, mylar.CONFIG.SAB_CLIENT_POST_PROCESSING is True]) or all([mylar.CONFIG.NZB_DOWNLOADER == 1, mylar.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]) ):
+                    return
+            except Exception as e:
+                return
+
+            logger.fdebug('Terminating the NZB auto-complete queue thread')
+            try:
+                mylar.NZB_QUEUE.put('exit')
+                mylar.NZBPOOL.join(5)
+                logger.fdebug('Joined pool for termination -  successful')
+            except KeyboardInterrupt:
+                mylar.NZB_QUEUE.put('exit')
+                mylar.NZBPOOL.join(5)
+            except AssertionError:
+                if mode == 'shutdown':
+                   os._exit(0)
+
+
+        if (queuetype == 'snatched_queue') or mode == 'shutdown':
+            try:
+                if mylar.SNPOOL.isAlive() is False:
+                    return
+                elif all([mode != 'shutdown', mylar.CONFIG.ENABLE_TORRENTS is True, mylar.CONFIG.AUTO_SNATCH is True, OS_DETECT != 'Windows']) and any([mylar.CONFIG.TORRENT_DOWNLOADER == 2, mylar.CONFIG.TORRENT_DOWNLOADER == 4]):
+                    return
+            except Exception as e:
+                return
+
+
+            logger.fdebug('Terminating the auto-snatch thread.')
+            try:
+                mylar.SNATCHED_QUEUE.put('exit')
+                mylar.SNPOOL.join(5)
+                logger.fdebug('Joined pool for termination -  successful')
+            except KeyboardInterrupt:
+                mylar.SNATCHED_QUEUE.put('exit')
+                mylar.SNPOOL.join(5)
+            except AssertionError:
+                if mode == 'shutdown':
+                   os._exit(0)
+
+        if (queuetype == 'search_queue') or mode == 'shutdown':
+            try:
+                if mylar.SEARCHPOOL.isAlive() is False:
+                    return
+            except Exception as e:
+                return
+
+            logger.fdebug('Terminating the search queue thread.')
+            try:
+                mylar.SEARCH_QUEUE.put('exit')
+                mylar.SEARCHPOOL.join(5)
+                logger.fdebug('Joined pool for termination -  successful')
+            except KeyboardInterrupt:
+                mylar.SEARCH_QUEUE.put('exit')
+                mylar.SEARCHPOOL.join(5)
+            except AssertionError:
+                if mode == 'shutdown':
+                    os._exit(0)
+
+        if (queuetype == 'pp_queue') or mode == 'shutdown':
+            try:
+                if mylar.PPPOOL.isAlive() is False:
+                    return
+                elif all([mylar.CONFIG.POST_PROCESSING is True, mode != 'shutdown']):
+                    return
+            except Exception as e:
+                return
+
+            logger.fdebug('Terminating the post-processing queue thread.')
+            try:
+                mylar.PP_QUEUE.put('exit')
+                mylar.PPPOOL.join(5)
+                logger.fdebug('Joined pool for termination -  successful')
+            except KeyboardInterrupt:
+                mylar.PP_QUEUE.put('exit')
+                mylar.PPPOOL.join(5)
+            except AssertionError:
+                if mode == 'shutdown':
+                    os._exit(0)
+
+        if (queuetype == 'ddl_queue') or mode == 'shutdown':
+            try:
+                if mylar.DDLPOOL.isAlive() is False:
+                    return
+                elif all([mylar.CONFIG.ENABLE_DDL is True, mode != 'shutdown']):
+                    return
+            except Exception as e:
+                return
+
+            logger.fdebug('Terminating the DDL download queue thread')
+            try:
+                mylar.DDL_QUEUE.put('exit')
+                mylar.DDLPOOL.join(5)
+                logger.fdebug('Joined pool for termination -  successful')
+            except KeyboardInterrupt:
+                mylar.DDL_QUEUE.put('exit')
+                DDLPOOL.join(5)
+            except AssertionError:
+                if mode == 'shutdown':
+                   os._exit(0)
+
+
 def dbcheck():
     conn = sqlite3.connect(DB_FILE)
     c_error = 'sqlite3.OperationalError'
@@ -472,21 +662,21 @@ def dbcheck():
         c.execute('SELECT ReleaseDate from storyarcs')
     except sqlite3.OperationalError:
         try:
-            c.execute('CREATE TABLE IF NOT EXISTS storyarcs(StoryArcID TEXT, ComicName TEXT, IssueNumber TEXT, SeriesYear TEXT, IssueYEAR TEXT, StoryArc TEXT, TotalIssues TEXT, Status TEXT, inCacheDir TEXT, Location TEXT, IssueArcID TEXT, ReadingOrder INT, IssueID TEXT, ComicID TEXT, ReleaseDate TEXT, IssueDate TEXT, Publisher TEXT, IssuePublisher TEXT, IssueName TEXT, CV_ArcID TEXT, Int_IssueNumber INT, DynamicComicName TEXT, Volume TEXT, Manual TEXT)')
+            c.execute('CREATE TABLE IF NOT EXISTS storyarcs(StoryArcID TEXT, ComicName TEXT, IssueNumber TEXT, SeriesYear TEXT, IssueYEAR TEXT, StoryArc TEXT, TotalIssues TEXT, Status TEXT, inCacheDir TEXT, Location TEXT, IssueArcID TEXT, ReadingOrder INT, IssueID TEXT, ComicID TEXT, ReleaseDate TEXT, IssueDate TEXT, Publisher TEXT, IssuePublisher TEXT, IssueName TEXT, CV_ArcID TEXT, Int_IssueNumber INT, DynamicComicName TEXT, Volume TEXT, Manual TEXT, DateAdded TEXT, DigitalDate TEXT, Type TEXT, Aliases TEXT)')
             c.execute('INSERT INTO storyarcs(StoryArcID, ComicName, IssueNumber, SeriesYear, IssueYEAR, StoryArc, TotalIssues, Status, inCacheDir, Location, IssueArcID, ReadingOrder, IssueID, ComicID, ReleaseDate, IssueDate, Publisher, IssuePublisher, IssueName, CV_ArcID, Int_IssueNumber, DynamicComicName, Volume, Manual) SELECT StoryArcID, ComicName, IssueNumber, SeriesYear, IssueYEAR, StoryArc, TotalIssues, Status, inCacheDir, Location, IssueArcID, ReadingOrder, IssueID, ComicID, StoreDate, IssueDate, Publisher, IssuePublisher, IssueName, CV_ArcID, Int_IssueNumber, DynamicComicName, Volume, Manual FROM readinglist')
             c.execute('DROP TABLE readinglist')
         except sqlite3.OperationalError:
             logger.warn('Unable to update readinglist table to new storyarc table format.')
 
-    c.execute('CREATE TABLE IF NOT EXISTS comics (ComicID TEXT UNIQUE, ComicName TEXT, ComicSortName TEXT, ComicYear TEXT, DateAdded TEXT, Status TEXT, IncludeExtras INTEGER, Have INTEGER, Total INTEGER, ComicImage TEXT, ComicPublisher TEXT, ComicLocation TEXT, ComicPublished TEXT, NewPublish TEXT, LatestIssue TEXT, LatestDate TEXT, Description TEXT, QUALalt_vers TEXT, QUALtype TEXT, QUALscanner TEXT, QUALquality TEXT, LastUpdated TEXT, AlternateSearch TEXT, UseFuzzy TEXT, ComicVersion TEXT, SortOrder INTEGER, DetailURL TEXT, ForceContinuing INTEGER, ComicName_Filesafe TEXT, AlternateFileName TEXT, ComicImageURL TEXT, ComicImageALTURL TEXT, DynamicComicName TEXT, AllowPacks TEXT, Type TEXT, Corrected_SeriesYear TEXT, TorrentID_32P TEXT, LatestIssueID TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS issues (IssueID TEXT, ComicName TEXT, IssueName TEXT, Issue_Number TEXT, DateAdded TEXT, Status TEXT, Type TEXT, ComicID TEXT, ArtworkURL Text, ReleaseDate TEXT, Location TEXT, IssueDate TEXT, Int_IssueNumber INT, ComicSize TEXT, AltIssueNumber TEXT, IssueDate_Edit TEXT, ImageURL TEXT, ImageURL_ALT TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS comics (ComicID TEXT UNIQUE, ComicName TEXT, ComicSortName TEXT, ComicYear TEXT, DateAdded TEXT, Status TEXT, IncludeExtras INTEGER, Have INTEGER, Total INTEGER, ComicImage TEXT, ComicPublisher TEXT, ComicLocation TEXT, ComicPublished TEXT, NewPublish TEXT, LatestIssue TEXT, LatestDate TEXT, Description TEXT, QUALalt_vers TEXT, QUALtype TEXT, QUALscanner TEXT, QUALquality TEXT, LastUpdated TEXT, AlternateSearch TEXT, UseFuzzy TEXT, ComicVersion TEXT, SortOrder INTEGER, DetailURL TEXT, ForceContinuing INTEGER, ComicName_Filesafe TEXT, AlternateFileName TEXT, ComicImageURL TEXT, ComicImageALTURL TEXT, DynamicComicName TEXT, AllowPacks TEXT, Type TEXT, Corrected_SeriesYear TEXT, Corrected_Type TEXT, TorrentID_32P TEXT, LatestIssueID TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS issues (IssueID TEXT, ComicName TEXT, IssueName TEXT, Issue_Number TEXT, DateAdded TEXT, Status TEXT, Type TEXT, ComicID TEXT, ArtworkURL Text, ReleaseDate TEXT, Location TEXT, IssueDate TEXT, DigitalDate TEXT, Int_IssueNumber INT, ComicSize TEXT, AltIssueNumber TEXT, IssueDate_Edit TEXT, ImageURL TEXT, ImageURL_ALT TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS snatched (IssueID TEXT, ComicName TEXT, Issue_Number TEXT, Size INTEGER, DateAdded TEXT, Status TEXT, FolderName TEXT, ComicID TEXT, Provider TEXT, Hash TEXT, crc TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS upcoming (ComicName TEXT, IssueNumber TEXT, ComicID TEXT, IssueID TEXT, IssueDate TEXT, Status TEXT, DisplayComicName TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS nzblog (IssueID TEXT, NZBName TEXT, SARC TEXT, PROVIDER TEXT, ID TEXT, AltNZBName TEXT, OneOff TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS weekly (SHIPDATE TEXT, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, rowid INTEGER PRIMARY KEY)')
+    c.execute('CREATE TABLE IF NOT EXISTS weekly (SHIPDATE TEXT, PUBLISHER TEXT, ISSUE TEXT, COMIC VARCHAR(150), EXTRA TEXT, STATUS TEXT, ComicID TEXT, IssueID TEXT, CV_Last_Update TEXT, DynamicName TEXT, weeknumber TEXT, year TEXT, volume TEXT, seriesyear TEXT, annuallink TEXT, format TEXT, rowid INTEGER PRIMARY KEY)')
     c.execute('CREATE TABLE IF NOT EXISTS importresults (impID TEXT, ComicName TEXT, ComicYear TEXT, Status TEXT, ImportDate TEXT, ComicFilename TEXT, ComicLocation TEXT, WatchMatch TEXT, DisplayName TEXT, SRID TEXT, ComicID TEXT, IssueID TEXT, Volume TEXT, IssueNumber TEXT, DynamicName TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS readlist (IssueID TEXT, ComicName TEXT, Issue_Number TEXT, Status TEXT, DateAdded TEXT, Location TEXT, inCacheDir TEXT, SeriesYear TEXT, ComicID TEXT, StatusChange TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS annuals (IssueID TEXT, Issue_Number TEXT, IssueName TEXT, IssueDate TEXT, Status TEXT, ComicID TEXT, GCDComicID TEXT, Location TEXT, ComicSize TEXT, Int_IssueNumber INT, ComicName TEXT, ReleaseDate TEXT, ReleaseComicID TEXT, ReleaseComicName TEXT, IssueDate_Edit TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS annuals (IssueID TEXT, Issue_Number TEXT, IssueName TEXT, IssueDate TEXT, Status TEXT, ComicID TEXT, GCDComicID TEXT, Location TEXT, ComicSize TEXT, Int_IssueNumber INT, ComicName TEXT, ReleaseDate TEXT, DigitalDate TEXT, ReleaseComicID TEXT, ReleaseComicName TEXT, IssueDate_Edit TEXT, DateAdded TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS rssdb (Title TEXT UNIQUE, Link TEXT, Pubdate TEXT, Site TEXT, Size TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS futureupcoming (ComicName TEXT, IssueNumber TEXT, ComicID TEXT, IssueID TEXT, IssueDate TEXT, Publisher TEXT, Status TEXT, DisplayComicName TEXT, weeknumber TEXT, year TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS failed (ID TEXT, Status TEXT, ComicID TEXT, IssueID TEXT, Provider TEXT, ComicName TEXT, Issue_Number TEXT, NZBName TEXT, DateFailed TEXT)')
@@ -495,6 +685,8 @@ def dbcheck():
     c.execute('CREATE TABLE IF NOT EXISTS oneoffhistory (ComicName TEXT, IssueNumber TEXT, ComicID TEXT, IssueID TEXT, Status TEXT, weeknumber TEXT, year TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS jobhistory (JobName TEXT, prev_run_datetime timestamp, prev_run_timestamp REAL, next_run_datetime timestamp, next_run_timestamp REAL, last_run_completed TEXT, successful_completions TEXT, failed_completions TEXT, status TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS manualresults (provider TEXT, id TEXT, kind TEXT, comicname TEXT, volume TEXT, oneoff TEXT, fullprov TEXT, issuenumber TEXT, modcomicname TEXT, name TEXT, link TEXT, size TEXT, pack_numbers TEXT, pack_issuelist TEXT, comicyear TEXT, issuedate TEXT, tmpprov TEXT, pack TEXT, issueid TEXT, comicid TEXT, sarc TEXT, issuearcid TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS storyarcs(StoryArcID TEXT, ComicName TEXT, IssueNumber TEXT, SeriesYear TEXT, IssueYEAR TEXT, StoryArc TEXT, TotalIssues TEXT, Status TEXT, inCacheDir TEXT, Location TEXT, IssueArcID TEXT, ReadingOrder INT, IssueID TEXT, ComicID TEXT, ReleaseDate TEXT, IssueDate TEXT, Publisher TEXT, IssuePublisher TEXT, IssueName TEXT, CV_ArcID TEXT, Int_IssueNumber INT, DynamicComicName TEXT, Volume TEXT, Manual TEXT, DateAdded TEXT, DigitalDate TEXT, Type TEXT, Aliases TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS ddl_info (ID TEXT UNIQUE, series TEXT, year TEXT, filename TEXT, size TEXT, issueid TEXT, comicid TEXT, link TEXT, status TEXT, remote_filesize TEXT, updated_date TEXT, mainlink TEXT, issues TEXT)')
     conn.commit
     c.close
 
@@ -600,6 +792,11 @@ def dbcheck():
         c.execute('ALTER TABLE comics ADD COLUMN Corrected_SeriesYear TEXT')
 
     try:
+        c.execute('SELECT Corrected_Type from comics')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE comics ADD COLUMN Corrected_Type TEXT')
+
+    try:
         c.execute('SELECT TorrentID_32P from comics')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE comics ADD COLUMN TorrentID_32P TEXT')
@@ -608,6 +805,11 @@ def dbcheck():
         c.execute('SELECT LatestIssueID from comics')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE comics ADD COLUMN LatestIssueID TEXT')
+
+    try:
+        c.execute('SELECT Collects from comics')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE comics ADD COLUMN Collects CLOB')
 
     try:
         c.execute('SELECT DynamicComicName from comics')
@@ -651,6 +853,10 @@ def dbcheck():
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE issues ADD COLUMN ImageURL_ALT TEXT')
 
+    try:
+        c.execute('SELECT DigitalDate from issues')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE issues ADD COLUMN DigitalDate TEXT')
 
     ## -- ImportResults Table --
 
@@ -803,6 +1009,11 @@ def dbcheck():
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE weekly ADD COLUMN annuallink TEXT')
 
+    try:
+        c.execute('SELECT format from weekly')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE weekly ADD COLUMN format TEXT')
+
     ## -- Nzblog Table --
 
     try:
@@ -829,6 +1040,7 @@ def dbcheck():
         c.execute('SELECT OneOff from nzblog')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE nzblog ADD COLUMN OneOff TEXT')
+
     ## -- Annuals Table --
 
     try:
@@ -877,6 +1089,15 @@ def dbcheck():
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE annuals ADD COLUMN IssueDate_Edit TEXT')
 
+    try:
+        c.execute('SELECT DateAdded from annuals')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE annuals ADD COLUMN DateAdded TEXT')
+
+    try:
+        c.execute('SELECT DigitalDate from annuals')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE annuals ADD COLUMN DigitalDate TEXT')
 
     ## -- Snatched Table --
 
@@ -965,6 +1186,26 @@ def dbcheck():
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE storyarcs ADD COLUMN Manual TEXT')
 
+    try:
+        c.execute('SELECT DateAdded from storyarcs')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE storyarcs ADD COLUMN DateAdded TEXT')
+
+    try:
+        c.execute('SELECT DigitalDate from storyarcs')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE storyarcs ADD COLUMN DigitalDate TEXT')
+
+    try:
+        c.execute('SELECT Type from storyarcs')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE storyarcs ADD COLUMN Type TEXT')
+
+    try:
+        c.execute('SELECT Aliases from storyarcs')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE storyarcs ADD COLUMN Aliases TEXT')
+
     ## -- searchresults Table --
     try:
         c.execute('SELECT SRID from searchresults')
@@ -1015,6 +1256,27 @@ def dbcheck():
         c.execute('SELECT status from jobhistory')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE jobhistory ADD COLUMN status TEXT')
+
+    ## -- DDL_info Table --
+    try:
+        c.execute('SELECT remote_filesize from ddl_info')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE ddl_info ADD COLUMN remote_filesize TEXT')
+
+    try:
+        c.execute('SELECT updated_date from ddl_info')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE ddl_info ADD COLUMN updated_date TEXT')
+
+    try:
+        c.execute('SELECT mainlink from ddl_info')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE ddl_info ADD COLUMN mainlink TEXT')
+
+    try:
+        c.execute('SELECT issues from ddl_info')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE ddl_info ADD COLUMN issues TEXT')
 
     #if it's prior to Wednesday, the issue counts will be inflated by one as the online db's everywhere
     #prepare for the next 'new' release of a series. It's caught in updater.py, so let's just store the
@@ -1131,39 +1393,21 @@ def halt():
             logger.info('Shutting down the background schedulers...')
             SCHED.shutdown(wait=False)
 
-            if NZBPOOL is not None:
-                logger.info('Terminating the nzb auto-complete thread.')
-                try:
-                    NZBPOOL.join(10)
-                    logger.info('Joined pool for termination -  successful')
-                except KeyboardInterrupt:
-                    NZB_QUEUE.put('exit')
-                    NZBPOOL.join(5)
-                except AssertionError:
-                    os._exit(0)
+            queue_schedule('all', 'shutdown')
+            #if NZBPOOL is not None:
+            #    queue_schedule('nzb_queue', 'shutdown')
+            #if SNPOOL is not None:
+            #    queue_schedule('snatched_queue', 'shutdown')
 
-            if SNPOOL is not None:
-                logger.info('Terminating the auto-snatch thread.')
-                try:
-                    SNPOOL.join(10)
-                    logger.info('Joined pool for termination -  successful')
-                except KeyboardInterrupt:
-                    SNATCHED_QUEUE.put('exit')
-                    SNPOOL.join(5)
-                except AssertionError:
-                    os._exit(0)
+            #if SEARCHPOOL is not None:
+            #    queue_schedule('search_queue', 'shutdown')
 
+            #if PPPOOL is not None:
+            #    queue_schedule('pp_queue', 'shutdown')
 
-            if SEARCHPOOL is not None:
-                logger.info('Terminating the search queue thread.')
-                try:
-                    SEARCHPOOL.join(10)
-                    logger.info('Joined pool for termination -  successful')
-                except KeyboardInterrupt:
-                    SEARCH_QUEUE.put('exit')
-                    SEARCHPOOL.join(5)
-                except AssertionError:
-                    os._exit(0)
+            #if DDLPOOL is not None:
+            #    queue_schedule('ddl_queue', 'shutdown')
+
             _INITIALIZED = False
 
 def shutdown(restart=False, update=False, maintenance=False):

@@ -69,10 +69,27 @@
                                 except:
                                     pass
 
+                                comicline = comicname
+
+                                comictype = comic['Type']
+                                try:
+                                    if (any([comictype == 'None', comictype is None, comictype == 'Print']) and comic['Corrected_Type'] != 'TPB') or all([comic['Corrected_Type'] is not None, comic['Corrected_Type'] == 'Print']):
+                                        comictype = None
+                                    else:
+                                        if comic['Corrected_Type'] is not None:
+                                            comictype = comic['Corrected_Type']
+                                        else:
+                                            comictype = comictype
+                                except:
+                                    comictype = None
+
+                                if comictype is not None:
+                                    comicline += '  [%s]' % (comictype)
+
 			%>
 			<tr class="grade${grade}">
 				<td id="publisher"><span title="${comicpub}"></span>${comicpub}</td>
-                                <td id="name"><span title="${comicname}"></span><a title="${comic['ComicName']}" href="comicDetails?ComicID=${comic['ComicID']}">${comicname}</a></td>
+                                <td id="name"><span title="${comicname}"></span><a title="${comic['ComicName']}" href="comicDetails?ComicID=${comic['ComicID']}">${comicline}</a></td>
                                 <td id="year"><span title="${comic['ComicYear']}"></span>${comic['ComicYear']}</td>
 				<td id="issue"><span title="${comic['LatestIssue']}"></span># ${comic['LatestIssue']}</td>
                                 <td id="published">${comic['LatestDate']}</td>
@@ -101,19 +118,21 @@
 
 <%def name="headIncludes()">
         <link rel="stylesheet" href="interfaces/default/css/data_table.css">
-        <link type="text/css" href="css/dataTables.alphabetSearch.css" rel="stylesheet">
+        <link rel="stylesheet" href="css/alphabetSearch.css">
 </%def>
 
 <%def name="javascriptIncludes()">
         <script src="js/libs/jquery.dataTables.min.js"></script>
         <script src="js/libs/full_numbers_no_ellipses.js"></script>
-        <script src="js/dataTables.alphabetSearch.min.js"></script>
+        <script src="js/alphabetSearch.js"></script>
 	<script>
 
 	function initThisPage() {
                 $.fn.DataTable.ext.pager.numbers_length = 3;
-		var table = $('#series_table').dataTable( {
-		        "destroy": true,
+		 var alphaindex = "${alphaindex}"; 
+                 if (alphaindex == "True") {
+                     var table = $('#series_table').dataTable( {
+                        "destroy": true,
                         "sDom": '<"clear"Af><"clear"lp><"clear">rt<"clear"ip>',
                         "columnDefs": [
                              { "orderable": false, "targets": [5, 7, 10] },
@@ -131,15 +150,44 @@
                                 "info":"Showing _START_ to _END_ of _TOTAL_ results",
                                 "infoEmpty":"Showing 0 to 0 of 0 results",
                                 "infoFiltered":"(filtered from _MAX_ total results)",
-                                "search" : ""},
+                                "search" : ""
+			},
                         "stateSave": true,
+			"stateDuration": 0,
                         "pageLength": 25,
                         "pagingType": "simple_numbers",
-                        alphabetSearch: {
-                            column:1
-                        }
-		});
-                resetFilters("comic");
+                        alphabetSearch: { column:1 }
+		     });
+                 } else {
+                     var table = $('#series_table').dataTable( {
+                         "destroy": true,
+                         "sDom": '<"clear"f><"clear"lp><"clear">rt<"clear"ip>',
+                         "columnDefs": [
+                              { "orderable": false, "targets": [5, 7, 10] },
+                              { "visible": false, "targets": [5, 7, 10] },
+                              { "type": 'num', "targets": 5 },
+                              { "type": 'num', "targets": 7 },
+                              { "orderData": [ 5, 7 ], "targets": 6 },
+                              { "orderData": 10, "targets": 9 },
+                              { "order": [[7, 'asc'],[1, 'asc']] }
+                         ],
+                         "lengthMenu": [[10, 15, 25, 50, 100, 200, -1], [10, 15, 25, 50, 100, 200, 'All' ]],
+                         "language": {
+                                 "lengthMenu":"Show _MENU_ results per page",
+				 "emptyTable": "No results",
+                                 "info":"Showing _START_ to _END_ of _TOTAL_ results",
+                                 "infoEmpty":"Showing 0 to 0 of 0 results",
+                                 "infoFiltered":"(filtered from _MAX_ total results)",
+                                 "search" : ""
+                         },
+                         "stateSave": true,
+			 "stateDuration": 0,
+                         "pageLength": 25,
+                         "pagingType": "simple_numbers",
+                         alphabetSearch: { column: 1 }
+                     });
+                 }
+                 resetFilters("comic");
 	}
 	
 	$(document).ready(function(){

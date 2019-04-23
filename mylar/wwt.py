@@ -14,7 +14,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Mylar.  If not, see <http://www.gnu.org/licenses/>.
 
-import lib.requests as requests
+import requests
 from bs4 import BeautifulSoup, UnicodeDammit
 import urlparse
 import re
@@ -22,7 +22,7 @@ import time
 import sys
 import datetime
 from datetime import timedelta
-
+import lib.cfscrape as cfscrape
 
 import mylar
 from mylar import logger, helpers
@@ -30,7 +30,7 @@ from mylar import logger, helpers
 class wwt(object):
 
     def __init__(self, name, issue):
-        self.url = 'https://worldwidetorrents.me/'
+        self.url = mylar.WWTURL
         self.query = name + ' ' + str(int(issue)) #'Batman White Knight'
         logger.info('query set to : %s' % self.query)
         pass
@@ -43,9 +43,13 @@ class wwt(object):
                   'incldead': 0,
                   'lang': 0}
 
-        with requests.Session() as s:
+        with cfscrape.create_scraper() as s:
             newurl = self.url + 'torrents-search.php'
-            r = s.get(newurl, params=params, verify=True)
+            if mylar.WWT_CF_COOKIEVALUE is None:
+                cf_cookievalue, cf_user_agent = s.get_tokens(newurl, user_agent=mylar.CV_HEADERS['User-Agent'])
+                mylar.WWT_CF_COOKIEVALUE = cf_cookievalue
+
+            r = s.get(newurl, params=params, verify=True, cookies=mylar.WWT_CF_COOKIEVALUE, headers=mylar.CV_HEADERS)
 
             if not r.status_code == 200:
                 return

@@ -21,6 +21,7 @@ import threading
 import platform
 import urllib, urllib2
 from xml.dom.minidom import parseString, Element
+from xml.parsers.expat import ExpatError
 import requests
 
 import mylar
@@ -54,7 +55,7 @@ def pullsearch(comicapi, comicquery, offset, type):
            filterline+= ',name:%s' % x
        cnt+=1
 
-    PULLURL = mylar.CVURL + str(type) + 's?api_key=' + str(comicapi) + '&filter=name:' + filterline + '&field_list=id,name,start_year,site_detail_url,count_of_issues,image,publisher,deck,description,first_issue,last_issue&format=xml&offset=' + str(offset) # 2012/22/02 - CVAPI flipped back to offset instead of page
+    PULLURL = mylar.CVURL + str(type) + 's?api_key=' + str(comicapi) + '&filter=name:' + filterline + '&field_list=id,name,start_year,site_detail_url,count_of_issues,image,publisher,deck,description,first_issue,last_issue&format=xml&sort=date_last_updated:desc&offset=' + str(offset) # 2012/22/02 - CVAPI flipped back to offset instead of page
 
     #all these imports are standard on most modern python implementations
     #logger.info('MB.PULLURL:' + PULLURL)
@@ -70,8 +71,8 @@ def pullsearch(comicapi, comicquery, offset, type):
 
     try:
         r = requests.get(PULLURL, params=payload, verify=mylar.CONFIG.CV_VERIFY, headers=mylar.CV_HEADERS)
-    except Exception, e:
-        logger.warn('Error fetching data from ComicVine: %s' % (e))
+    except Exception as e:
+        logger.warn('Error fetching data from ComicVine: %s' % e)
         return
 
     try:
@@ -82,8 +83,11 @@ def pullsearch(comicapi, comicquery, offset, type):
         else:
             logger.warn('[WARNING] ComicVine is not responding correctly at the moment. This is usually due to some problems on their end. If you re-try things again in a few moments, it might work properly.')
         return
-
-    return dom
+    except Exception as e:
+        logger.warn('[ERROR] Error returned from CV: %s' % e)
+        return
+    else:
+        return dom
 
 def findComic(name, mode, issue, limityear=None, type=None):
 
@@ -359,8 +363,8 @@ def findComic(name, mode, issue, limityear=None, type=None):
 
                             xmltype = None
                             if xmldeck != 'None':
-                                if any(['print' in xmldeck.lower(), 'digital' in xmldeck.lower(), 'paperback' in xmldeck.lower(), 'hardcover' in xmldeck.lower()]):
-                                    if 'print' in xmldeck.lower():
+                                if any(['print' in xmldeck.lower(), 'digital' in xmldeck.lower(), 'paperback' in xmldeck.lower(), 'one shot' in re.sub('-', '', xmldeck.lower()).strip(), 'hardcover' in xmldeck.lower()]):
+                                    if all(['print' in xmldeck.lower(), 'reprint' not in xmldeck.lower()]):
                                         xmltype = 'Print'
                                     elif 'digital' in xmldeck.lower():
                                         xmltype = 'Digital'
@@ -368,15 +372,38 @@ def findComic(name, mode, issue, limityear=None, type=None):
                                         xmltype = 'TPB'
                                     elif 'hardcover' in xmldeck.lower():
                                         xmltype = 'HC'
+                                    elif 'oneshot' in re.sub('-', '', xmldeck.lower()).strip():
+                                        xmltype = 'One-Shot'
+                                    else:
+                                        xmltype = 'Print'
+
                             if xmldesc != 'None' and xmltype is None:
-                                if 'print' in xmldesc[:60].lower() and 'print edition can be found' not in xmldesc.lower():
+                                if 'print' in xmldesc[:60].lower() and all(['print edition can be found' not in xmldesc.lower(), 'reprints' not in xmldesc.lower()]):
                                     xmltype = 'Print'
                                 elif 'digital' in xmldesc[:60].lower() and 'digital edition can be found' not in xmldesc.lower():
                                     xmltype = 'Digital'
-                                elif 'paperback' in xmldesc[:60].lower() and 'paperback can be found' not in xmldesc.lower():
+                                elif all(['paperback' in xmldesc[:60].lower(), 'paperback can be found' not in xmldesc.lower()]) or 'collects' in xmldesc[:60].lower():
                                     xmltype = 'TPB'
                                 elif 'hardcover' in xmldesc[:60].lower() and 'hardcover can be found' not in xmldesc.lower():
                                     xmltype = 'HC'
+                                elif any(['one-shot' in xmldesc[:60].lower(), 'one shot' in xmldesc[:60].lower()]) and any(['can be found' not in xmldesc.lower(), 'following the' not in xmldesc.lower()]):
+                                    i = 0
+                                    xmltype = 'One-Shot'
+                                    avoidwords = ['preceding', 'after the special', 'following the']
+                                    while i < 2:
+                                        if i == 0:
+                                            cbd = 'one-shot'
+                                        elif i == 1:
+                                            cbd = 'one shot'
+                                        tmp1 = xmldesc[:60].lower().find(cbd)
+                                        if tmp1 != -1:
+                                            for x in avoidwords:
+                                                tmp2 = xmldesc[:tmp1].lower().find(x)
+                                                if tmp2 != -1:
+                                                    xmltype = 'Print'
+                                                    i = 3
+                                                    break
+                                        i+=1
                                 else:
                                     xmltype = 'Print'
 
@@ -436,30 +463,26 @@ def storyarcinfo(xmlid):
 
     try:
         r = requests.get(ARCPULL_URL, params=payload, verify=mylar.CONFIG.CV_VERIFY, headers=mylar.CV_HEADERS)
-    except Exception, e:
-        logger.warn('Error fetching data from ComicVine: %s' % (e))
+    except Exception as e:
+        logger.warn('While parsing data from ComicVine, got exception: %s' % e)
         return
-#    try:
-#        file = urllib2.urlopen(ARCPULL_URL)
-#    except urllib2.HTTPError, err:
-#        logger.error('err : ' + str(err))
-#        logger.error('There was a major problem retrieving data from ComicVine - on their end.')
-#        return
-#    arcdata = file.read()
-#    file.close()
+
     try:
-        arcdom = parseString(r.content) #(arcdata)
+        arcdom = parseString(r.content)
     except ExpatError:
         if u'<title>Abnormal Traffic Detected' in r.content:
-            logger.error("ComicVine has banned this server's IP address because it exceeded the API rate limit.")
+            logger.error('ComicVine has banned this server\'s IP address because it exceeded the API rate limit.')
         else:
-            logger.warn('While parsing data from ComicVine, got exception: %s for data: %s' % (str(e), r.content))
+            logger.warn('While parsing data from ComicVine, got exception: %s for data: %s' % (e, r.content))
+        return
+    except Exception as e:
+        logger.warn('While parsing data from ComicVine, got exception: %s for data: %s' % (e, r.content))
         return
 
     try:
         logger.fdebug('story_arc ascension')
-        issuecount = len( arcdom.getElementsByTagName('issue') )
         issuedom = arcdom.getElementsByTagName('issue')
+        issuecount = len( issuedom ) #arcdom.getElementsByTagName('issue') )
         isc = 0
         arclist = ''
         ordernum = 1
